@@ -7,7 +7,7 @@ PY    := $(VENV)/bin/python
 BER    = PYTHONPATH=$(ROOT)/src $(PY) -m business_entity_resolution
 
 .DEFAULT_GOAL := help
-.PHONY: help setup lfs data doctor mini full experiment test lint fmt validate package clean clean-all
+.PHONY: help setup lfs data doctor mini full score-mini experiment test lint fmt validate package clean clean-all
 
 help: ## list available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -31,6 +31,9 @@ mini: ## 15-record end-to-end sanity run (embeddings off)
 
 full: ## real dataset end-to-end run
 	SKIP_SETUP=1 bash run.sh full
+
+score-mini: ## score output/mini against the labeled dataset/mini/test_ground_truth.tsv
+	$(BER) evaluate-output --config configs/mini.json
 
 experiment: ## measured iteration (holdout fit/score/tune/evaluate) -> experiments/experiment_log.tsv
 	$(BER) experiment --config configs/remote_full.json $(if $(NAME),--name "$(NAME)",) $(if $(NOTES),--notes "$(NOTES)",)

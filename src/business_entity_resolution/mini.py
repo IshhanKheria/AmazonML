@@ -2,22 +2,18 @@
 
 The mini set is *sampled from the real files* so it carries the same schema,
 noise (abbreviations, transliterations, reordered/landmark addresses, missing
-addresses), country mix, and match cardinality — only tiny. It is used to run
-the full pipeline end-to-end on a laptop without touching the full corpus.
+addresses), country mix, and match cardinality — only tiny.
 
-Key realism point: France appears only in the **test** files, not in training.
-The mini set therefore builds:
-  * ``train/``  from the real training files (US + India) with ground truth
-  * ``test/``   from the real test files (US + India + France), no ground truth
+Composition (default quotas):
+  * ``train/``  from the real training files (US + India) with ground truth.
+  * ``test/``   US + India **sampled from the training files** so it carries
+    real matches *and* ground truth (``test_ground_truth.tsv``), plus France
+    entities sampled from the real test files as open-set singletons (they have
+    no training labels, so their expected match set is empty).
 
-Composition (default 15 Source 1 entities per split):
-  * several US, India in train; US + India + France in test
-  * at least one singleton, several single-match, several multi-match,
-    and at least one entity matched by both Source 2 and Source 3
-  * Source 2/3 pool includes true matches plus non-matching decoys
-
-Scans are streamed and stop as soon as enough records are collected, so this is
-fast regardless of the full dataset size.
+This makes the mini test split scoreable end-to-end via
+``business_entity_resolution evaluate-output`` while still exercising unseen
+``France`` handling. The real challenge test files remain unlabeled, as always.
 """
 
 from __future__ import annotations
@@ -66,7 +62,7 @@ def _choose(buffers: dict[str, list[str]], quotas: dict[str, int], rng: random.R
 
 def _scan_targets(
     data_root: Path,
-    split: str,
+    read_split: str,
     source: int,
     needed: set[str],
     quotas: dict[str, int],
@@ -76,7 +72,7 @@ def _scan_targets(
     lookup: dict[str, dict] = {}
     decoys: dict[str, list[dict]] = defaultdict(list)
     remaining = set(needed)
-    for chunk in iter_tsv(source_path(data_root, split, source), SOURCE_COLUMNS, batch_size=100_000):
+    for chunk in iter_tsv(source_path(data_root, read_split, source), SOURCE_COLUMNS, batch_size=100_000):
         if remaining:
             selected = chunk[chunk["entity_id"].isin(remaining)]
             for row in selected.itertuples(index=False):
@@ -100,16 +96,18 @@ def _scan_targets(
 
 def _build_split(
     data_root: Path,
-    out_dir: Path,
-    split: str,
+    out_split: str,
     quotas: dict[str, int],
     rng: random.Random,
     with_ground_truth: bool,
-) -> dict[str, int]:
+    read_split: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, dict[str, object]]:
+    """Sample one split and return (source1, source2, source3, ground_truth, summary)."""
+    read_split = read_split or out_split
     # 1) Stream Source 1 until each country buffer is full.
     buffers: dict[str, list[str]] = defaultdict(list)
     s1_rows: dict[str, dict] = {}
-    for chunk in iter_tsv(source_path(data_root, split, 1), SOURCE_COLUMNS, batch_size=100_000):
+    for chunk in iter_tsv(source_path(data_root, read_split, 1), SOURCE_COLUMNS, batch_size=100_000):
         _collect_s1(chunk, quotas, buffers, s1_rows)
         if _buffers_ready(buffers, quotas):
             break
@@ -163,29 +161,45 @@ def _build_split(
     # 2) Collect target rows (true matches + decoys) for both target sources.
     needed_s2 = {t for e in chosen for t in truth_map.get(e, []) if t.startswith("S2-")}
     needed_s3 = {t for e in chosen for t in truth_map.get(e, []) if t.startswith("S3-")}
-    s2_rows, s2_decoys = _scan_targets(data_root, split, 2, needed_s2, quotas, rng)
-    s3_rows, s3_decoys = _scan_targets(data_root, split, 3, needed_s3, quotas, rng)
+    s2_rows, s2_decoys = _scan_targets(data_root, read_split, 2, needed_s2, quotas, rng)
+    s3_rows, s3_decoys = _scan_targets(data_root, read_split, 3, needed_s3, quotas, rng)
     for country in quotas:
         s2_rows.extend(s2_decoys.get(country, []))
         s3_rows.extend(s3_decoys.get(country, []))
     mini_s2 = pd.DataFrame(s2_rows, columns=SOURCE_COLUMNS) if s2_rows else pd.DataFrame(columns=SOURCE_COLUMNS)
     mini_s3 = pd.DataFrame(s3_rows, columns=SOURCE_COLUMNS) if s3_rows else pd.DataFrame(columns=SOURCE_COLUMNS)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _write_tsv(mini_s1, out_dir / f"{split}_source1.tsv")
-    _write_tsv(mini_s2, out_dir / f"{split}_source2.tsv")
-    _write_tsv(mini_s3, out_dir / f"{split}_source3.tsv")
-
+    mini_gt: pd.DataFrame | None = None
     if with_ground_truth:
         included = set(mini_s2["entity_id"]) | set(mini_s3["entity_id"])
         gt_rows = [(e, ",".join(t for t in truth_map.get(e, []) if t in included)) for e in chosen]
         mini_gt = pd.DataFrame(gt_rows, columns=GROUND_TRUTH_COLUMNS)
-        _write_tsv(mini_gt, out_dir / "train_ground_truth.tsv")
 
     countries = mini_s1["country"].value_counts().to_dict() if not mini_s1.empty else {}
-    return {"source1": len(mini_s1), "source2": len(mini_s2), "source3": len(mini_s3),
-            "singletons": int(sum(1 for e in chosen if not truth_map.get(e))) if with_ground_truth else 0,
-            "countries": countries}
+    summary = {
+        "source1": len(mini_s1),
+        "source2": len(mini_s2),
+        "source3": len(mini_s3),
+        "singletons": int(sum(1 for e in chosen if not truth_map.get(e))) if with_ground_truth else 0,
+        "countries": countries,
+    }
+    return mini_s1, mini_s2, mini_s3, mini_gt, summary
+
+
+def _dedupe(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    return frame.drop_duplicates(subset="entity_id", keep="first").reset_index(drop=True)
+
+
+def _write_split(out_dir: Path, out_split: str, s1: pd.DataFrame, s2: pd.DataFrame, s3: pd.DataFrame, gt: pd.DataFrame | None) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _write_tsv(s1, out_dir / f"{out_split}_source1.tsv")
+    _write_tsv(s2, out_dir / f"{out_split}_source2.tsv")
+    _write_tsv(s3, out_dir / f"{out_split}_source3.tsv")
+    if gt is not None:
+        name = "train_ground_truth.tsv" if out_split == "train" else "test_ground_truth.tsv"
+        _write_tsv(gt, out_dir / name)
 
 
 def build_mini(
@@ -195,13 +209,42 @@ def build_mini(
     count: int = 15,
     seed: int = 2026,
 ) -> dict[str, object]:
-    """Sample a realistic mini train/test dataset into ``mini_root``."""
+    """Sample a realistic, scoreable mini train/test dataset into ``mini_root``."""
     data_root = Path(data_root)
     mini_root = Path(mini_root)
     rng = random.Random(seed)
 
-    train_summary = _build_split(data_root, mini_root / "train", "train", dict(TRAIN_QUOTA), rng, with_ground_truth=True)
-    test_summary = _build_split(data_root, mini_root / "test", "test", dict(TEST_QUOTA), rng, with_ground_truth=False)
+    train_s1, train_s2, train_s3, train_gt, train_summary = _build_split(
+        data_root, "train", dict(TRAIN_QUOTA), rng, with_ground_truth=True
+    )
+    _write_split(mini_root / "train", "train", train_s1, train_s2, train_s3, train_gt)
+
+    # Labeled test: US/India sampled from the *training* files so real matches
+    # and ground truth exist.
+    label_quota = {country: TEST_QUOTA[country] for country in ("US", "India")}
+    lab_s1, lab_s2, lab_s3, lab_gt, _ = _build_split(
+        data_root, "test", label_quota, rng, with_ground_truth=True, read_split="train"
+    )
+    # Open-set extras: France entities from the *test* files, expected singletons.
+    fr_s1, fr_s2, fr_s3, _, _ = _build_split(
+        data_root, "test", {"France": TEST_QUOTA["France"]}, rng, with_ground_truth=False, read_split="test"
+    )
+
+    test_s1 = pd.concat([lab_s1, fr_s1], ignore_index=True)
+    test_s2 = _dedupe(pd.concat([lab_s2, fr_s2], ignore_index=True))
+    test_s3 = _dedupe(pd.concat([lab_s3, fr_s3], ignore_index=True))
+    france_gt = pd.DataFrame([(e, "") for e in fr_s1["entity_id"]], columns=GROUND_TRUTH_COLUMNS)
+    test_gt = pd.concat([lab_gt, france_gt], ignore_index=True) if lab_gt is not None else france_gt
+    _write_split(mini_root / "test", "test", test_s1, test_s2, test_s3, test_gt)
+
+    test_summary = {
+        "source1": len(test_s1),
+        "source2": len(test_s2),
+        "source3": len(test_s3),
+        "labeled": len(lab_s1),
+        "singletons": int(sum(1 for value in test_gt["matched_entity_ids"] if not value)),
+        "countries": test_s1["country"].value_counts().to_dict() if not test_s1.empty else {},
+    }
     return {"train": train_summary, "test": test_summary}
 
 

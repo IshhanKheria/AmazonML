@@ -114,6 +114,9 @@ def run_profile(profile: str, validator: str | None, skip_embeddings: bool) -> i
         ["train", "--config", config, "--model", spec["model"], "--all-training-data"],
         ["infer", "--config", config, "--model", spec["model"]],
     ]
+    if profile == "mini":
+        # Mini ships a labeled test split, so score the written output directly.
+        steps.append(["evaluate-output", "--config", config])
     if validator:
         steps.append(["preflight", "--config", config, "--official-validator", validator, "--check-ids"])
 

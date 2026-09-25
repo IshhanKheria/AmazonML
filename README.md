@@ -17,6 +17,11 @@ make help      # list every target
 `make` is a thin, self-documenting wrapper around the CLI. You can always call the
 pipeline directly (see [CLI stages](#cli-stages)).
 
+`make mini` builds a **labeled** 15-entity test set
+(`dataset/mini/test/test_ground_truth.tsv`), so the run ends with a real macro-F0.5
+on the written output; re-score anytime with `make score-mini`. France entities are
+sampled from the real test files as open-set singletons (expected empty).
+
 ## Repository layout
 
 ```text

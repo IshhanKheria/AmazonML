@@ -18,7 +18,7 @@ from .audit import audit_dataset
 from .blocking import BLOCKING_VERSION, CandidateGenerator
 from .checkpoint import ShardStore, input_fingerprint, shard_for_id, stage_fingerprint
 from .config import ProjectConfig
-from .data import iter_tsv, load_ground_truth, load_ground_truth_for_ids, source_path
+from .data import iter_tsv, load_ground_truth, load_ground_truth_for_ids, read_tsv, source_path
 from .decisions import apply_thresholds, apply_thresholds_with_france, score_quantile_thresholds, sweep_thresholds, tune_source_thresholds
 from .embeddings import embed_split, load_embedding_vectors
 from .error_analysis import analyze_errors
@@ -34,7 +34,7 @@ from .pipeline import run_smoke
 from .preflight import preflight_outputs, run_official_validator
 from .resources import run_with_oom_backoff
 from .sampling import sample_candidate_negatives
-from .schemas import SOURCE_COLUMNS
+from .schemas import GROUND_TRUTH_COLUMNS, SOURCE_COLUMNS
 from .splits import assign_s1_folds
 from .submission import write_submission_outputs
 
@@ -627,6 +627,43 @@ def command_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_output_lists(path: Path) -> dict[str, frozenset[str]]:
+    frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    return {
+        str(row.source1_entity_id): frozenset(value for value in str(row.matched_entity_ids).split(",") if value)
+        for row in frame.itertuples(index=False)
+    }
+
+
+def command_evaluate_output(args: argparse.Namespace) -> int:
+    """Score a written matching_results.tsv against a ground-truth TSV (macro F0.5)."""
+    config = _load_config(args)
+    logger = stage_logger(config, "evaluate-output")
+    matching = config.output_root / "matching_results.tsv"
+    if not matching.is_file():
+        raise FileNotFoundError(f"output not found: {matching}; run infer first")
+    gt_path = Path(args.ground_truth) if args.ground_truth else config.data_root / "test" / "test_ground_truth.tsv"
+    if not gt_path.is_absolute():
+        gt_path = (Path.cwd() / gt_path).resolve()
+    if not gt_path.is_file():
+        raise FileNotFoundError(f"no ground truth at {gt_path}; this split is unlabeled (the real test set has no labels)")
+    truth = ground_truth_sets(read_tsv(gt_path, GROUND_TRUTH_COLUMNS))
+    predictions = _read_output_lists(matching)
+    metrics = evaluate_entity_sets(truth, predictions)
+    missing = set(truth) - set(predictions)
+    if missing:
+        metrics["missing_output_rows"] = len(missing)
+    out = config.artifact_dir("decisions") / "output_evaluation.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"output": str(matching), "ground_truth": str(gt_path), **metrics}
+    out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    for name, value in metrics.items():
+        logger.metric(name, value)
+    _json_print(payload)
+    print(out)
+    return 0
+
+
 def _experiment_log_path() -> Path:
     return Path(__file__).resolve().parents[2] / "experiments" / "experiment_log.tsv"
 
@@ -975,6 +1012,7 @@ def build_parser() -> argparse.ArgumentParser:
     score = add_common("score", command_score); score.add_argument("--split", choices=["train", "test"], required=True); score.add_argument("--model", choices=["deterministic", "sgd", "lightgbm"], default="sgd"); score.add_argument("--model-path"); score.add_argument("--validation-fold", type=int, default=0); score.add_argument("--all-training-data", action="store_true")
     tune = add_common("tune-decision", command_tune_decision); tune.add_argument("--threshold-count", type=int, default=101); tune.add_argument("--tune-passes", type=int, default=1); tune.add_argument("--validation-fold", type=int, default=0); tune.add_argument("--all-training-data", action="store_true")
     evaluate = add_common("evaluate", command_evaluate); evaluate.add_argument("--score-file", default="train.parquet"); evaluate.add_argument("--threshold", type=float)
+    evaluate_output = add_common("evaluate-output", command_evaluate_output); evaluate_output.add_argument("--ground-truth")
     experiment = add_common("experiment", command_experiment); experiment.add_argument("--name"); experiment.add_argument("--notes", default=""); experiment.add_argument("--model", choices=["deterministic", "sgd", "lightgbm"], default="lightgbm"); experiment.add_argument("--validation-fold", type=int, default=0); experiment.add_argument("--threshold-count", type=int, default=101); experiment.add_argument("--tune-passes", type=int, default=1)
     errors = add_common("analyze-errors", command_analyze_errors); errors.add_argument("--score-file", default="train.parquet"); errors.add_argument("--threshold", type=float)
     infer = add_common("infer", command_infer); infer.add_argument("--model", choices=["deterministic", "sgd", "lightgbm"], default="sgd"); infer.add_argument("--model-path"); infer.add_argument("--threshold", type=float); infer.add_argument("--no-tfidf", action="store_true")
