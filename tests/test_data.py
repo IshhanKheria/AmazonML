@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from business_entity_resolution.data import load_ground_truth_for_ids, read_tsv, validate_entity_frame
+from business_entity_resolution.data import count_tsv_rows, load_ground_truth_for_ids, read_tsv, validate_entity_frame
 from business_entity_resolution.schemas import SOURCE_COLUMNS, SchemaError
 
 
@@ -12,6 +12,12 @@ def test_tsv_loader_preserves_commas_and_empty_address(tmp_path):
     assert frame.loc[0, "business_address"] == "Paris, France"
     assert frame.loc[1, "business_address"] == ""
     validate_entity_frame(frame, 2)
+
+
+def test_count_tsv_rows_excludes_header(tmp_path):
+    path = tmp_path / "rows.tsv"
+    path.write_text("a\tb\n1\t2\n3\t4\n5\t6\n", encoding="utf-8")
+    assert count_tsv_rows(path) == 3
 
 
 def test_wrong_schema_and_duplicate_ids_fail(tmp_path):

@@ -47,6 +47,7 @@ class StageLogger:
         self.echo = echo
         self.path = Path(path) if path is not None else None
         self.started = time.time()
+        self._samples: list[tuple[float, int]] = []
         if self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -69,9 +70,20 @@ class StageLogger:
         self._emit(self._compose("METRIC", name, {"value": value, **fields}))
 
     def progress(self, stage: str, done: int, total: int, extra: dict[str, Any] | None = None) -> None:
-        elapsed = time.time() - self.started
-        rate = done / elapsed if elapsed > 0 and done > 0 else 0.0
-        eta = (total - done) / rate if rate > 0 else float("inf")
+        now = time.time()
+        elapsed = now - self.started
+        # Rolling rate over the last few samples so resumed/cached fast work does
+        # not skew the estimate; falls back to the stage average.
+        self._samples.append((now, done))
+        if len(self._samples) > 10:
+            self._samples = self._samples[-10:]
+        window_start, window_done = self._samples[0]
+        window_elapsed = now - window_start
+        if len(self._samples) >= 2 and window_elapsed > 0 and done > window_done:
+            rate = (done - window_done) / window_elapsed
+        else:
+            rate = done / elapsed if elapsed > 0 and done > 0 else 0.0
+        eta = max(0.0, (total - done) / rate) if rate > 0 else float("inf")
         fields: dict[str, Any] = {
             "done": done,
             "total": total,
@@ -94,6 +106,7 @@ class StageLogger:
 
     def stage_start(self, stage: str, **fields: Any) -> None:
         self.started = time.time()
+        self._samples = []
         self._emit(self._compose("STAGE_START", stage, fields))
 
     def stage_end(self, stage: str, **fields: Any) -> None:

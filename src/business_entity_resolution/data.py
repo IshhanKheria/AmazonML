@@ -21,6 +21,19 @@ def ground_truth_path(data_root: str | Path) -> Path:
     return Path(data_root) / "train" / "train_ground_truth.tsv"
 
 
+def count_tsv_rows(path: str | Path) -> int:
+    """Count data rows (excluding the header) without parsing, for progress ETA."""
+    path = Path(path)
+    newlines = 0
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1 << 20)
+            if not block:
+                break
+            newlines += block.count(b"\n")
+    return max(0, newlines - 1)
+
+
 def read_tsv(path: str | Path, expected_columns: tuple[str, ...], nrows: int | None = None) -> pd.DataFrame:
     path = Path(path)
     if not path.is_file():

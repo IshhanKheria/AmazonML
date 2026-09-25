@@ -18,7 +18,7 @@ from .audit import audit_dataset
 from .blocking import BLOCKING_VERSION, CandidateGenerator
 from .checkpoint import ShardStore, input_fingerprint, shard_for_id, stage_fingerprint
 from .config import ProjectConfig
-from .data import iter_tsv, load_ground_truth, load_ground_truth_for_ids, read_tsv, source_path
+from .data import count_tsv_rows, iter_tsv, load_ground_truth, load_ground_truth_for_ids, read_tsv, source_path
 from .decisions import apply_thresholds, apply_thresholds_with_france, score_quantile_thresholds, sweep_thresholds, tune_source_thresholds
 from .embeddings import embed_split, load_embedding_vectors
 from .error_analysis import analyze_errors
@@ -89,6 +89,26 @@ def _prepared_shard_store(config: ProjectConfig, split: str, source: int) -> Sha
     return ShardStore(directory, fingerprint)
 
 
+def _expected_rows(config: ProjectConfig, path: Path) -> int:
+    """Total data rows for progress ETA, cached by path/size/mtime."""
+    cache_path = config.artifact_dir("prepared") / "_rowcounts.json"
+    cache: dict[str, dict[str, int]] = {}
+    if cache_path.is_file():
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            cache = {}
+    stat = path.stat()
+    entry = cache.get(str(path))
+    if entry and entry.get("size") == int(stat.st_size) and entry.get("mtime") == int(stat.st_mtime):
+        return int(entry["rows"])
+    rows = count_tsv_rows(path)
+    cache[str(path)] = {"size": int(stat.st_size), "mtime": int(stat.st_mtime), "rows": rows}
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+    return rows
+
+
 def _read_prepared_part(config: ProjectConfig, split: str, source: int, key: int) -> pd.DataFrame:
     directory = _prepared_dir(config, split, source)
     path = directory / "parts" / f"part-{int(key):05d}.parquet"
@@ -145,6 +165,9 @@ def command_prepare(args: argparse.Namespace) -> int:
             chunk_dir.mkdir(parents=True, exist_ok=True)
             total_rows = 0
             written_chunks = 0
+            expected_rows = _expected_rows(config, path)
+            if config.max_rows is not None:
+                expected_rows = min(expected_rows, config.max_rows)
             for sequence, chunk in enumerate(iter_tsv(path, SOURCE_COLUMNS, config.batch_size, config.max_rows), start=1):
                 chunk_path = chunk_dir / f"chunk-{sequence:07d}.parquet"
                 if not chunk_path.is_file():
@@ -152,7 +175,7 @@ def command_prepare(args: argparse.Namespace) -> int:
                     write_frame(normalized, chunk_path)
                 total_rows += len(chunk)
                 written_chunks = sequence
-                logger.progress("prepare", min(total_rows, config.max_rows or total_rows), config.max_rows or total_rows)
+                logger.progress("prepare", total_rows, max(expected_rows, total_rows))
             logger.info("raw chunks written", chunks=written_chunks, rows_seen=total_rows)
 
             # Consolidate interim chunks into final S1-ID-range shards.
