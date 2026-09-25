@@ -54,6 +54,23 @@ def input_fingerprint(paths: Iterable[str | Path]) -> str:
     return config_fingerprint({"inputs": entries})
 
 
+def stage_fingerprint(stage_dir: str | Path) -> str:
+    """Return the fingerprint recorded in a stage manifest, or ``""`` if absent.
+
+    Readers use this so they can attach to whatever fingerprint the writer
+    actually used (which may depend on options like embeddings being enabled),
+    without having to recompute every variant.
+    """
+    path = Path(stage_dir) / "manifest.json"
+    if not path.is_file():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(data.get("fingerprint", ""))
+
+
 class ShardStore:
     """Manage resumable, fingerprinted shards for one stage directory."""
 

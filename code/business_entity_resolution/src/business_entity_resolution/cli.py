@@ -14,7 +14,7 @@ import pandas as pd
 from .artifacts import read_frame, write_frame, write_manifest
 from .audit import audit_dataset
 from .blocking import CandidateGenerator
-from .checkpoint import ShardStore, input_fingerprint, shard_for_id
+from .checkpoint import ShardStore, input_fingerprint, shard_for_id, stage_fingerprint
 from .config import ProjectConfig
 from .data import iter_tsv, load_ground_truth, load_ground_truth_for_ids, source_path
 from .decisions import apply_thresholds, apply_thresholds_with_france, score_quantile_thresholds, sweep_thresholds
@@ -47,6 +47,18 @@ def _force(args: argparse.Namespace) -> bool:
 def _load_config(args: argparse.Namespace) -> ProjectConfig:
     overrides = {"max_rows": getattr(args, "max_rows", None)}
     return ProjectConfig.load(args.config, overrides)
+
+
+def _split_input_fingerprint(config: ProjectConfig, split: str) -> str:
+    return input_fingerprint([source_path(config.data_root, split, source) for source in (1, 2, 3)])
+
+
+def _candidate_fingerprint(config: ProjectConfig, split: str, include_tfidf: bool = True) -> str:
+    return _split_input_fingerprint(config, split) + ":" + json.dumps(config.blocking, sort_keys=True) + f":tfidf={include_tfidf}"
+
+
+def _feature_fingerprint(config: ProjectConfig, split: str, embeddings_used: bool = False) -> str:
+    return _split_input_fingerprint(config, split) + f":embeddings={embeddings_used}"
 
 
 def _prepared_dir(config: ProjectConfig, split: str, source: int) -> Path:
@@ -187,9 +199,7 @@ def command_generate_candidates(args: argparse.Namespace) -> int:
     logger = stage_logger(config, f"candidates-{args.split}")
     source1 = _read_prepared(config, args.split, 1)
     targets = [(_read_prepared(config, args.split, source), source) for source in (2, 3)]
-    fingerprint = input_fingerprint(
-        [source_path(config.data_root, args.split, source) for source in (1, 2, 3)]
-    ) + ":" + json.dumps(config.blocking, sort_keys=True) + f":tfidf={not args.no_tfidf}"
+    fingerprint = _candidate_fingerprint(config, args.split, include_tfidf=not args.no_tfidf)
     store = ShardStore(config.artifact_dir("candidates") / args.split, fingerprint)
     if _force(args):
         for stale in store.parts_dir.glob("part-*"):
@@ -280,7 +290,7 @@ def command_build_features(args: argparse.Namespace) -> int:
     logger = stage_logger(config, f"features-{args.split}")
     candidate_store = ShardStore(
         config.artifact_dir("candidates") / args.split,
-        input_fingerprint([source_path(config.data_root, args.split, source) for source in (1, 2, 3)]),
+        _candidate_fingerprint(config, args.split, include_tfidf=not getattr(args, "no_tfidf", False)),
     )
     source1 = _read_prepared(config, args.split, 1)
     targets = pd.concat([_read_prepared(config, args.split, 2), _read_prepared(config, args.split, 3)], ignore_index=True)
@@ -289,9 +299,7 @@ def command_build_features(args: argparse.Namespace) -> int:
     embed_names, embed_addrs = (None, None) if getattr(args, "no_embeddings", False) else load_embedding_vectors(config, args.split)
     embeddings_used = embed_names is not None
 
-    fingerprint = input_fingerprint(
-        [source_path(config.data_root, args.split, source) for source in (1, 2, 3)]
-    ) + f":embeddings={embeddings_used}"
+    fingerprint = _feature_fingerprint(config, args.split, embeddings_used)
     store = ShardStore(config.artifact_dir("features") / args.split, fingerprint)
     if _force(args):
         for stale in store.parts_dir.glob("part-*"):
@@ -373,10 +381,7 @@ def command_train(args: argparse.Namespace) -> int:
     config = _load_config(args)
     logger = stage_logger(config, f"train-{args.model}")
     logger.stage_start("train", model=args.model, all_training_data=bool(args.all_training_data))
-    store = ShardStore(
-        config.artifact_dir("features") / "train",
-        input_fingerprint([source_path(config.data_root, "train", source) for source in (1, 2, 3)]),
-    )
+    store = _feature_store(config, "train")
     features = store.read_all()
     if features.empty:
         raise FileNotFoundError("no training features found; run build-features first")
@@ -409,17 +414,13 @@ def command_train(args: argparse.Namespace) -> int:
 
 
 def _feature_store(config: ProjectConfig, split: str) -> ShardStore:
-    return ShardStore(
-        config.artifact_dir("features") / split,
-        input_fingerprint([source_path(config.data_root, split, source) for source in (1, 2, 3)]),
-    )
+    directory = config.artifact_dir("features") / split
+    return ShardStore(directory, stage_fingerprint(directory))
 
 
 def _candidate_store(config: ProjectConfig, split: str) -> ShardStore:
-    return ShardStore(
-        config.artifact_dir("candidates") / split,
-        input_fingerprint([source_path(config.data_root, split, source) for source in (1, 2, 3)]),
-    )
+    directory = config.artifact_dir("candidates") / split
+    return ShardStore(directory, stage_fingerprint(directory))
 
 
 def command_score(args: argparse.Namespace) -> int:
