@@ -228,12 +228,20 @@ def command_prepare(args: argparse.Namespace) -> int:
                     yield sequence, chunk, str(chunk_dir / f"chunk-{sequence:07d}.parquet"), str(fragment_root), config.n_shards
 
             workers = _workers(config)
-            logger.info("normalizing chunks", workers=workers)
-            for sequence, rows in parallel_imap(_prepare_chunk_worker, _chunk_tasks(), workers, max_inflight=workers * 2):
-                total_rows += rows
-                written_chunks = max(written_chunks, sequence)
-                logger.progress("prepare", total_rows, max(expected_rows, total_rows))
-            logger.info("raw chunks written", chunks=written_chunks, rows_seen=total_rows)
+            normalize_marker = chunk_dir / "_normalize_complete"
+            if normalize_marker.is_file():
+                # Normalization already finished on a prior run; skip re-parsing
+                # the raw TSV and go straight to consolidation.
+                logger.info("normalize already complete; skipping raw scan")
+                total_rows = expected_rows
+            else:
+                logger.info("normalizing chunks", workers=workers)
+                for sequence, rows in parallel_imap(_prepare_chunk_worker, _chunk_tasks(), workers, max_inflight=workers * 2):
+                    total_rows += rows
+                    written_chunks = max(written_chunks, sequence)
+                    logger.progress("prepare", total_rows, max(expected_rows, total_rows))
+                normalize_marker.write_text("", encoding="utf-8")
+                logger.info("raw chunks written", chunks=written_chunks, rows_seen=total_rows)
 
             # Consolidate per-shard fragments into the final shards, one shard per
             # worker (independent, so this no longer runs single-threaded).
