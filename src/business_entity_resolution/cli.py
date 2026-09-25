@@ -117,13 +117,44 @@ def _expected_rows(config: ProjectConfig, path: Path) -> int:
     return rows
 
 
-def _prepare_chunk_worker(task: tuple[int, pd.DataFrame, str]) -> tuple[int, int]:
-    """Normalize one raw chunk to its interim parquet (runs in a worker process)."""
-    sequence, chunk, chunk_path = task
+def _prepare_chunk_worker(task: tuple[int, pd.DataFrame, str, str, int]) -> tuple[int, int]:
+    """Normalize one raw chunk and split it into per-shard fragments.
+
+    Runs in a worker process. The normalized chunk is cached, and its rows are
+    written once into ``fragments/shard-<k>/`` so the consolidation phase can be
+    parallelized one shard per worker instead of a single global pass.
+    """
+    sequence, chunk, chunk_path, fragment_root, n_shards = task
     path = Path(chunk_path)
-    if not path.is_file():
-        write_frame(normalize_records(chunk), path)
-    return sequence, len(chunk)
+    marker = Path(fragment_root) / f".done-{sequence:07d}"
+    if path.is_file() and marker.is_file():
+        return sequence, len(chunk)
+    if path.is_file():
+        normalized = read_frame(path)
+    else:
+        normalized = normalize_records(chunk)
+        write_frame(normalized, path)
+    keys = normalized["entity_id"].map(lambda value: shard_for_id(value, n_shards))
+    for key, group in normalized.groupby(keys, sort=False):
+        fragment = Path(fragment_root) / f"shard-{int(key):05d}" / f"chunk-{sequence:07d}.parquet"
+        if not fragment.is_file():
+            write_frame(group, fragment)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("", encoding="utf-8")
+    return sequence, len(normalized)
+
+
+_CONSOLIDATE_STATE: dict[str, object] = {}
+
+
+def _consolidate_shard_worker(key: int) -> tuple[int, int]:
+    """Concatenate one shard's fragments and commit it (runs in a worker)."""
+    state = _CONSOLIDATE_STATE
+    fragment_dir = Path(state["fragment_root"]) / f"shard-{int(key):05d}"
+    paths = sorted(fragment_dir.glob("chunk-*.parquet"))
+    frame = pd.concat([read_frame(path) for path in paths], ignore_index=True) if paths else pd.DataFrame()
+    state["store"].commit(int(key), frame)
+    return int(key), len(frame)
 
 
 def _read_prepared_part(config: ProjectConfig, split: str, source: int, key: int) -> pd.DataFrame:
@@ -169,7 +200,9 @@ def command_prepare(args: argparse.Namespace) -> int:
             logger.stage_start("prepare", split=split, source=source, shards=config.n_shards)
             logger.resource_plan(plan)
             if force:
-                for stale in store.parts_dir.glob("chunk-*"):
+                shutil.rmtree(store.parts_dir / "chunks", ignore_errors=True)
+                shutil.rmtree(store.parts_dir / "fragments", ignore_errors=True)
+                for stale in store.parts_dir.glob("part-*"):
                     stale.unlink()
                 store.stage_manifest_path().unlink(missing_ok=True)
             if store.is_complete():
@@ -177,9 +210,12 @@ def command_prepare(args: argparse.Namespace) -> int:
                 logger.stage_end("prepare", split=split, source=source, skipped=True)
                 continue
 
-            # Interim, resumable chunk files (independent of final shard layout).
+            # Interim, resumable chunk files + per-shard fragments (for parallel
+            # consolidation), independent of the final shard layout.
             chunk_dir = store.parts_dir / "chunks"
             chunk_dir.mkdir(parents=True, exist_ok=True)
+            fragment_root = store.parts_dir / "fragments"
+            fragment_root.mkdir(parents=True, exist_ok=True)
             total_rows = 0
             written_chunks = 0
             expected_rows = _expected_rows(config, path)
@@ -189,7 +225,7 @@ def command_prepare(args: argparse.Namespace) -> int:
 
             def _chunk_tasks():
                 for sequence, chunk in enumerate(iter_tsv(path, SOURCE_COLUMNS, config.batch_size, limit), start=1):
-                    yield sequence, chunk, str(chunk_dir / f"chunk-{sequence:07d}.parquet")
+                    yield sequence, chunk, str(chunk_dir / f"chunk-{sequence:07d}.parquet"), str(fragment_root), config.n_shards
 
             workers = _workers(config)
             logger.info("normalizing chunks", workers=workers)
@@ -199,30 +235,19 @@ def command_prepare(args: argparse.Namespace) -> int:
                 logger.progress("prepare", total_rows, max(expected_rows, total_rows))
             logger.info("raw chunks written", chunks=written_chunks, rows_seen=total_rows)
 
-            # Consolidate interim chunks into final S1-ID-range shards.
-            buffer: dict[int, list[pd.DataFrame]] = {}
-            pending = set(range(config.n_shards))
-            flushed = 0
-            for chunk_path in sorted(chunk_dir.glob("chunk-*.parquet")):
-                frame = read_frame(chunk_path)
-                keys = frame["entity_id"].map(lambda value: shard_for_id(value, config.n_shards))
-                for key, group in frame.groupby(keys, sort=False):
-                    buffer.setdefault(int(key), []).append(group)
-                for key in list(buffer):
-                    if int(sum(len(f) for f in buffer[key])) >= max(1, plan.chunk_pairs):
-                        store.commit(key, pd.concat(buffer.pop(key), ignore_index=True))
-                        pending.discard(key)
-                        flushed += 1
-                        logger.progress("consolidate", flushed, config.n_shards, extra={"pending_shards": len(pending)})
-            for key in list(buffer):
-                store.commit(key, pd.concat(buffer.pop(key), ignore_index=True))
-                pending.discard(key)
-            for key in sorted(pending):
-                store.commit(key, store.read_all().iloc[0:0])
+            # Consolidate per-shard fragments into the final shards, one shard per
+            # worker (independent, so this no longer runs single-threaded).
+            _CONSOLIDATE_STATE["fragment_root"] = str(fragment_root)
+            _CONSOLIDATE_STATE["store"] = store
+            logger.info("consolidating shards", workers=workers, shards=config.n_shards)
+            for index, (key, rows) in enumerate(parallel_map(_consolidate_shard_worker, list(range(config.n_shards)), workers), start=1):
+                logger.progress("consolidate", index, config.n_shards, extra={"shard": key, "rows": rows})
+            shutil.rmtree(fragment_root, ignore_errors=True)
             rows = store.total_rows()
             schema = list(_read_prepared(config, split, source).columns)
             store.mark_complete(rows, schema, extra={"split": split, "source": source})
             write_manifest(store.stage_manifest_path(), stage=f"prepare-{split}-source{source}", config=config.as_dict(), rows=rows, schema=schema)
+            shutil.rmtree(chunk_dir, ignore_errors=True)
             logger.info("prepared", split=split, source=source, rows=rows)
             logger.stage_end("prepare", split=split, source=source, rows=rows)
     return 0
