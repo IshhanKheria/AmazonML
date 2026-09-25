@@ -40,3 +40,7 @@ reports/*.json
 Thumbs.db
 .idea/
 .vscode/
+
+# Generated mini dataset and build metadata
+code/business_entity_resolution/dataset/
+*.egg-info/
