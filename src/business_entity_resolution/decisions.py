@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Iterable
+import numpy as np
 import pandas as pd
 
 from .metrics import evaluate_entity_sets
+
+
+def _group_selected(selected: pd.DataFrame) -> dict[str, frozenset[str]]:
+    if selected.empty:
+        return {}
+    grouped = selected.groupby("source1_entity_id", sort=False)["candidate_entity_id"].agg(
+        lambda values: frozenset(str(value) for value in values)
+    )
+    return {str(key): value for key, value in grouped.items()}
 
 
 def apply_thresholds(
@@ -15,14 +25,14 @@ def apply_thresholds(
     source_thresholds: Mapping[str, float] | None = None,
 ) -> dict[str, frozenset[str]]:
     source_thresholds = source_thresholds or {}
-    predictions: dict[str, set[str]] = {str(entity_id): set() for entity_id in all_source1_ids}
-    for row in scored_pairs.itertuples(index=False):
-        candidate_id = str(row.candidate_entity_id)
-        source = str(getattr(row, "candidate_source", candidate_id[:2]))
-        cutoff = float(source_thresholds.get(source, threshold))
-        if float(row.score) >= cutoff:
-            predictions.setdefault(str(row.source1_entity_id), set()).add(candidate_id)
-    return {key: frozenset(value) for key, value in predictions.items()}
+    predictions: dict[str, frozenset[str]] = {str(entity_id): frozenset() for entity_id in all_source1_ids}
+    if scored_pairs.empty:
+        return predictions
+    sources = scored_pairs["candidate_source"].astype(str)
+    cutoffs = sources.map(lambda source: float(source_thresholds.get(source, threshold))).to_numpy()
+    selected = scored_pairs.loc[scored_pairs["score"].to_numpy() >= cutoffs]
+    predictions.update(_group_selected(selected))
+    return predictions
 
 
 def sweep_thresholds(
@@ -123,25 +133,27 @@ def apply_thresholds_with_france(
     observed 79% exact-name overlap in France.
     """
     source_thresholds = source_thresholds or {}
-    predictions: dict[str, set[str]] = {str(entity_id): set() for entity_id in all_source1_ids}
+    predictions: dict[str, frozenset[str]] = {str(entity_id): frozenset() for entity_id in all_source1_ids}
     if source1 is None or "country_norm" not in source1.columns:
         return apply_thresholds(scored_pairs, all_source1_ids, threshold, source_thresholds)
+    if scored_pairs.empty:
+        return predictions
     country_by_s1 = dict(zip(source1["entity_id"].astype(str), source1["country_norm"].astype(str)))
-    for row in scored_pairs.itertuples(index=False):
-        candidate_id = str(row.candidate_entity_id)
-        source = str(getattr(row, "candidate_source", candidate_id[:2]))
-        cutoff = float(source_thresholds.get(source, threshold))
-        country = country_by_s1.get(str(row.source1_entity_id), "")
-        if country == "france":
-            cutoff += france_margin
-            override = (
-                float(getattr(row, "name_core_exact", 0.0)) >= 1.0
-                and float(getattr(row, "numeric_overlap", 0.0)) >= 1.0
-            )
-            if float(row.score) < cutoff and not override:
-                continue
-        elif float(row.score) < cutoff:
-            continue
-        predictions.setdefault(str(row.source1_entity_id), set()).add(candidate_id)
-    return {key: frozenset(value) for key, value in predictions.items()}
+    sources = scored_pairs["candidate_source"].astype(str)
+    cutoffs = sources.map(lambda source: float(source_thresholds.get(source, threshold))).to_numpy()
+    countries = scored_pairs["source1_entity_id"].astype(str).map(lambda value: country_by_s1.get(value, "")).to_numpy()
+    is_france = countries == "france"
+    cutoffs = cutoffs + np.where(is_france, float(france_margin), 0.0)
+    if "name_core_exact" in scored_pairs.columns:
+        name_exact = scored_pairs["name_core_exact"].to_numpy(dtype=float)
+    else:
+        name_exact = np.zeros(len(scored_pairs))
+    if "numeric_overlap" in scored_pairs.columns:
+        numeric = scored_pairs["numeric_overlap"].to_numpy(dtype=float)
+    else:
+        numeric = np.zeros(len(scored_pairs))
+    override = (name_exact >= 1.0) & (numeric >= 1.0)
+    keep = (scored_pairs["score"].to_numpy() >= cutoffs) | (is_france & override)
+    predictions.update(_group_selected(scored_pairs.loc[keep]))
+    return predictions
 

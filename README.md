@@ -140,6 +140,18 @@ Both files contain exactly one row per test S1, including blank rows. Internal
 preflight enforces target existence, duplicate rules, candidate containment, exact
 columns, and empty-list handling before the official validator runs.
 
+## Experiment loop
+
+`make experiment NAME=some-idea` fits on every fold except 0, scores/tunes/evaluates
+on fold 0, persists `decisions/best_thresholds.json`, and appends one row to
+`experiments/experiment_log.tsv` (macro P/R/F0.5, singleton accuracy, false merges,
+candidate recall/count, runtime). Change one thing, re-run, compare rows.
+
+Candidates and features are the expensive stages and are checkpointed + fingerprinted,
+so model/threshold experiments reuse them. Changing blocking invalidates candidates and
+features. `train`/`score` stream feature shards and sample negatives per shard, so peak
+memory stays bounded instead of loading the full feature set.
+
 ## Submission package
 
 The challenge expects a single archive named `<team_name>_submission.zip`:

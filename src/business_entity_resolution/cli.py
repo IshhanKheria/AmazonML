@@ -35,7 +35,7 @@ from .preflight import preflight_outputs, run_official_validator
 from .resources import run_with_oom_backoff
 from .sampling import sample_candidate_negatives
 from .schemas import SOURCE_COLUMNS
-from .splits import assign_s1_folds, select_pair_fold
+from .splits import assign_s1_folds
 from .submission import write_submission_outputs
 
 
@@ -385,45 +385,91 @@ def _default_model_path(config: ProjectConfig, kind: str) -> Path:
     return path
 
 
+def _fold_entities(config: ProjectConfig, validation_fold: int, *, validation: bool) -> set[str]:
+    folds = read_frame(config.artifact_dir("splits") / "s1_folds.parquet")
+    mask = folds["fold"].eq(validation_fold) if validation else folds["fold"].ne(validation_fold)
+    return set(folds.loc[mask, "source1_entity_id"].astype(str))
+
+
+def _load_training_features(
+    config: ProjectConfig,
+    *,
+    validation_fold: int,
+    all_training_data: bool,
+    sample: bool,
+    max_negatives: int,
+) -> pd.DataFrame:
+    """Stream feature shards, keep the training fold, and sample negatives per shard.
+
+    Sampling per shard is equivalent to sampling globally because every shard
+    contains whole Source 1 entities (candidates are sharded by S1 ID), so peak
+    memory stays bounded by the sampled result instead of the full feature set.
+    """
+    store = _feature_store(config, "train")
+    allowed = None if all_training_data else _fold_entities(config, validation_fold, validation=False)
+    parts: list[pd.DataFrame] = []
+    for part in store.iter_parts():
+        frame = read_frame(part)
+        if frame.empty or "label" not in frame.columns:
+            continue
+        if allowed is not None:
+            frame = frame[frame["source1_entity_id"].astype(str).isin(allowed)]
+            if frame.empty:
+                continue
+        if sample:
+            frame = sample_candidate_negatives(frame, max_negatives_per_entity=max_negatives, seed=config.seed)
+        parts.append(frame)
+    if not parts:
+        return store.read_all().iloc[0:0]
+    return pd.concat(parts, ignore_index=True)
+
+
+def _fit_model(config: ProjectConfig, kind: str, *, validation_fold: int, all_training_data: bool, logger) -> tuple[Path, int, int]:
+    sampling = config.sampling or {}
+    sample_enabled = bool(sampling.get("enabled", True)) and kind != "deterministic"
+    features = _load_training_features(
+        config,
+        validation_fold=validation_fold,
+        all_training_data=all_training_data,
+        sample=sample_enabled,
+        max_negatives=int(sampling.get("max_negatives_per_entity", 50)),
+    )
+    if features.empty:
+        raise FileNotFoundError("no training features found; run build-features first")
+    if "label" not in features.columns:
+        raise ValueError("training features are unlabeled")
+    logger.info("training data ready", rows=len(features), positives=int(features["label"].sum()))
+    model = _new_model(config, kind)
+    X, y = feature_matrix(features), features["label"].to_numpy(dtype=np.int8)
+    weights = features["sample_weight"].to_numpy(dtype=np.float32) if "sample_weight" in features else None
+    run_with_oom_backoff(
+        lambda _size: model.fit(X, y, sample_weight=weights),
+        max(1, len(features)),
+        on_retry=lambda size, exc: logger.event("oom_backoff", stage="train", error=type(exc).__name__),
+    )
+    suffix = ".txt" if kind == "lightgbm" else ".joblib" if kind == "sgd" else ".json"
+    path = config.artifact_dir("models") / f"{kind}{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    model.save(path)
+    write_manifest(
+        path.with_suffix(path.suffix + ".manifest.json"),
+        stage=f"train-{kind}",
+        config=config.as_dict(),
+        rows=len(features),
+        schema=list(features.columns),
+        metrics={"positive_rows": int(y.sum()), "validation_fold": None if all_training_data else validation_fold, "all_training_data": bool(all_training_data)},
+    )
+    return path, len(features), int(y.sum())
+
+
 def command_train(args: argparse.Namespace) -> int:
     config = _load_config(args)
     logger = stage_logger(config, f"train-{args.model}")
     logger.stage_start("train", model=args.model, all_training_data=bool(args.all_training_data))
-    store = _feature_store(config, "train")
-    features = store.read_all()
-    if features.empty:
-        raise FileNotFoundError("no training features found; run build-features first")
-    if "label" not in features:
-        raise ValueError("training features are unlabeled")
-    if not args.all_training_data:
-        folds = read_frame(config.artifact_dir("splits") / "s1_folds.parquet")
-        features = select_pair_fold(features, folds, args.validation_fold, validation=False)
-    sampling = config.sampling or {}
-    if bool(sampling.get("enabled", True)) and args.model != "deterministic":
-        features = sample_candidate_negatives(
-            features,
-            max_negatives_per_entity=int(sampling.get("max_negatives_per_entity", 50)),
-            seed=config.seed,
-        )
-    logger.info("training data ready", rows=len(features), positives=int(features["label"].sum()))
-    model = _new_model(config, args.model)
-    X, y = feature_matrix(features), features["label"].to_numpy(dtype=np.int8)
-    weights = features["sample_weight"].to_numpy(dtype=np.float32) if "sample_weight" in features else None
-
-    def _fit(_size: int):
-        return model.fit(X, y, sample_weight=weights)
-
-    run_with_oom_backoff(
-        _fit,
-        max(1, len(features)),
-        on_retry=lambda size, exc: logger.event("oom_backoff", stage="train", error=type(exc).__name__),
+    path, rows, positives = _fit_model(
+        config, args.model, validation_fold=args.validation_fold, all_training_data=bool(args.all_training_data), logger=logger
     )
-    suffix = ".txt" if args.model == "lightgbm" else ".joblib" if args.model == "sgd" else ".json"
-    path = config.artifact_dir("models") / f"{args.model}{suffix}"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    model.save(path)
-    write_manifest(path.with_suffix(path.suffix + ".manifest.json"), stage=f"train-{args.model}", config=config.as_dict(), rows=len(features), schema=list(features.columns), metrics={"positive_rows": int(y.sum()), "validation_fold": None if args.all_training_data else args.validation_fold, "all_training_data": bool(args.all_training_data)})
-    logger.stage_end("train", rows=len(features), positives=int(y.sum()))
+    logger.stage_end("train", rows=rows, positives=positives)
     print(path)
     return 0
 
@@ -438,23 +484,54 @@ def _candidate_store(config: ProjectConfig, split: str) -> ShardStore:
     return ShardStore(directory, stage_fingerprint(directory))
 
 
+def _score_split(
+    config: ProjectConfig,
+    split: str,
+    model_kind: str,
+    *,
+    validation_fold: int = 0,
+    all_training_data: bool = False,
+    model_path: Path | None = None,
+) -> Path:
+    """Score feature shards one at a time and write a single scores parquet."""
+    store = _feature_store(config, split)
+    allowed = None
+    if split == "train" and not all_training_data:
+        allowed = _fold_entities(config, validation_fold, validation=True)
+    model = _load_model(model_kind, model_path or _default_model_path(config, model_kind))
+    parts: list[pd.DataFrame] = []
+    for part in store.iter_parts():
+        frame = read_frame(part)
+        if frame.empty:
+            continue
+        if allowed is not None:
+            frame = frame[frame["source1_entity_id"].astype(str).isin(allowed)]
+            if frame.empty:
+                continue
+        scored = frame[["source1_entity_id", "candidate_entity_id", "candidate_source"]].copy()
+        scored["score"] = model.predict_scores(feature_matrix(frame))
+        # Persist the signals the France override needs so evaluate/tune/infer agree.
+        for signal in ("name_core_exact", "numeric_overlap"):
+            if signal in frame:
+                scored[signal] = frame[signal].to_numpy()
+        if "label" in frame:
+            scored["label"] = frame["label"]
+        parts.append(scored)
+    columns = ["source1_entity_id", "candidate_entity_id", "candidate_source", "score"]
+    scored = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
+    return write_frame(scored, config.artifact_dir("scores") / f"{split}.parquet")
+
+
 def command_score(args: argparse.Namespace) -> int:
     config = _load_config(args)
-    features = _feature_store(config, args.split).read_all()
-    if args.split == "train" and not args.all_training_data:
-        folds = read_frame(config.artifact_dir("splits") / "s1_folds.parquet")
-        features = select_pair_fold(features, folds, args.validation_fold, validation=True)
-    model_path = Path(args.model_path) if args.model_path else _default_model_path(config, args.model)
-    model = _load_model(args.model, model_path)
-    scored = features[["source1_entity_id", "candidate_entity_id", "candidate_source"]].copy()
-    scored["score"] = model.predict_scores(feature_matrix(features))
-    # Persist the signals the France override needs so evaluate/tune/infer agree.
-    for signal in ("name_core_exact", "numeric_overlap"):
-        if signal in features:
-            scored[signal] = features[signal].to_numpy()
-    if "label" in features:
-        scored["label"] = features["label"]
-    out = write_frame(scored, config.artifact_dir("scores") / f"{args.split}.parquet")
+    out = _score_split(
+        config,
+        args.split,
+        args.model,
+        validation_fold=args.validation_fold,
+        all_training_data=bool(args.all_training_data),
+        model_path=Path(args.model_path) if args.model_path else None,
+    )
     print(out)
     return 0
 
@@ -516,13 +593,10 @@ def command_tune_decision(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_evaluate(args: argparse.Namespace) -> int:
-    config = _load_config(args)
-    logger = stage_logger(config, "evaluate")
-    scored = read_frame(config.artifact_dir("scores") / args.score_file)
+def _evaluate_scores(config: ProjectConfig, score_file: str, threshold: float, source_thresholds: dict[str, float]) -> dict:
+    scored = read_frame(config.artifact_dir("scores") / score_file)
     scored_ids = set(scored["source1_entity_id"].astype(str))
     truth = ground_truth_sets(_training_truth(config, scored_ids))
-    threshold, source_thresholds = _resolve_thresholds(config, args)
     source1 = _read_prepared(config, "train", 1)
     predictions = apply_thresholds_with_france(
         scored,
@@ -532,10 +606,136 @@ def command_evaluate(args: argparse.Namespace) -> int:
         france_margin=float((config.model or {}).get("france_margin", 0.05)),
         source_thresholds=source_thresholds,
     )
-    metrics = evaluate_entity_sets(truth, predictions)
+    return evaluate_entity_sets(truth, predictions)
+
+
+def command_evaluate(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    logger = stage_logger(config, "evaluate")
+    threshold, source_thresholds = _resolve_thresholds(config, args)
+    metrics = _evaluate_scores(config, args.score_file, threshold, source_thresholds)
+    out = config.artifact_dir("decisions") / "evaluation.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps({"threshold": threshold, "source_thresholds": source_thresholds, "score_file": args.score_file, **metrics}, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     for name, value in metrics.items():
         logger.metric(name, value)
     _json_print(metrics)
+    print(out)
+    return 0
+
+
+def _experiment_log_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "experiments" / "experiment_log.tsv"
+
+
+def _append_experiment(row: dict[str, object]) -> Path:
+    path = _experiment_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file():
+        header = path.read_text(encoding="utf-8").splitlines()[0].split("\t")
+    else:
+        header = list(row.keys())
+        path.write_text("\t".join(header) + "\n", encoding="utf-8")
+    values = ["" if row.get(column) is None else str(row.get(column, "")) for column in header]
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\t".join(values) + "\n")
+    return path
+
+
+def command_experiment(args: argparse.Namespace) -> int:
+    """One measured iteration: holdout fit -> score -> tune -> evaluate -> log."""
+    config = _load_config(args)
+    name = args.name or time.strftime("exp-%Y%m%d-%H%M%S", time.gmtime())
+    logger = stage_logger(config, f"experiment-{name}")
+    started = time.time()
+    logger.stage_start("experiment", name=name, model=args.model, validation_fold=args.validation_fold)
+
+    _, rows, _ = _fit_model(config, args.model, validation_fold=args.validation_fold, all_training_data=False, logger=logger)
+    _score_split(config, "train", args.model, validation_fold=args.validation_fold, all_training_data=False)
+
+    scored = read_frame(config.artifact_dir("scores") / "train.parquet")
+    scored_ids = set(scored["source1_entity_id"].astype(str))
+    truth = ground_truth_sets(_training_truth(config, scored_ids))
+    source1 = _read_prepared(config, "train", 1)
+    thresholds = score_quantile_thresholds(scored, args.threshold_count)
+    tuned = tune_source_thresholds(
+        scored,
+        truth,
+        thresholds,
+        source1=source1,
+        france_margin=float((config.model or {}).get("france_margin", 0.05)),
+        max_passes=args.tune_passes,
+    )
+    predictions = apply_thresholds_with_france(
+        scored,
+        truth.keys(),
+        tuned["threshold"],
+        source1=source1,
+        france_margin=float((config.model or {}).get("france_margin", 0.05)),
+        source_thresholds=tuned["source_thresholds"],
+    )
+    metrics = evaluate_entity_sets(truth, predictions)
+
+    best_path = _decision_thresholds_path(config)
+    best_path.parent.mkdir(parents=True, exist_ok=True)
+    best_path.write_text(
+        json.dumps(
+            {
+                "threshold": tuned["threshold"],
+                "source_thresholds": tuned["source_thresholds"],
+                "macro_f0_5": tuned["macro_f0_5"],
+                "validation_fold": int(args.validation_fold),
+                "all_training_data": False,
+                "experiment": name,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    candidate_metrics: dict[str, object] = {}
+    candidate_manifest = config.artifact_dir("candidates") / "train" / "manifest.json"
+    if candidate_manifest.is_file():
+        try:
+            candidate_metrics = json.loads(candidate_manifest.read_text(encoding="utf-8")).get("metrics", {}) or {}
+        except json.JSONDecodeError:
+            candidate_metrics = {}
+
+    elapsed = time.time() - started
+    row = {
+        "experiment_id": name,
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "status": "ok",
+        "git_or_code_version": "",
+        "data_split": f"train fold={args.validation_fold}",
+        "seed": config.seed,
+        "candidate_strategy": json.dumps(config.blocking, sort_keys=True),
+        "candidate_recall": candidate_metrics.get("candidate_recall", ""),
+        "candidate_count": candidate_metrics.get("candidate_count", ""),
+        "reduction_ratio": candidate_metrics.get("reduction_ratio", ""),
+        "features": f"rows={rows}",
+        "model": args.model,
+        "hyperparameters": json.dumps((config.model or {}).get("params", {}), sort_keys=True),
+        "decision_rule": f"threshold={tuned['threshold']:.6f} source_thresholds={tuned['source_thresholds']}",
+        "macro_precision": metrics["macro_precision"],
+        "macro_recall": metrics["macro_recall"],
+        "macro_f0_5": metrics["macro_f0_5"],
+        "singleton_accuracy": metrics["singleton_accuracy"],
+        "false_merges": metrics["false_merges"],
+        "missed_matches": metrics["missed_matches"],
+        "runtime_seconds": round(elapsed, 1),
+        "memory_notes": "",
+        "license_notes": "lightgbm MIT; bge-m3 MIT" if config.embeddings_enabled() else "lightgbm MIT",
+        "artifact_paths": str(config.artifact_dir("decisions")),
+        "notes": args.notes or "",
+    }
+    log_path = _append_experiment(row)
+    logger.stage_end("experiment", name=name, macro_f0_5=metrics["macro_f0_5"], runtime_s=round(elapsed, 1))
+    _json_print({**metrics, "experiment": name, "threshold": tuned["threshold"], "source_thresholds": tuned["source_thresholds"], "log": str(log_path)})
     return 0
 
 
@@ -775,6 +975,7 @@ def build_parser() -> argparse.ArgumentParser:
     score = add_common("score", command_score); score.add_argument("--split", choices=["train", "test"], required=True); score.add_argument("--model", choices=["deterministic", "sgd", "lightgbm"], default="sgd"); score.add_argument("--model-path"); score.add_argument("--validation-fold", type=int, default=0); score.add_argument("--all-training-data", action="store_true")
     tune = add_common("tune-decision", command_tune_decision); tune.add_argument("--threshold-count", type=int, default=101); tune.add_argument("--tune-passes", type=int, default=1); tune.add_argument("--validation-fold", type=int, default=0); tune.add_argument("--all-training-data", action="store_true")
     evaluate = add_common("evaluate", command_evaluate); evaluate.add_argument("--score-file", default="train.parquet"); evaluate.add_argument("--threshold", type=float)
+    experiment = add_common("experiment", command_experiment); experiment.add_argument("--name"); experiment.add_argument("--notes", default=""); experiment.add_argument("--model", choices=["deterministic", "sgd", "lightgbm"], default="lightgbm"); experiment.add_argument("--validation-fold", type=int, default=0); experiment.add_argument("--threshold-count", type=int, default=101); experiment.add_argument("--tune-passes", type=int, default=1)
     errors = add_common("analyze-errors", command_analyze_errors); errors.add_argument("--score-file", default="train.parquet"); errors.add_argument("--threshold", type=float)
     infer = add_common("infer", command_infer); infer.add_argument("--model", choices=["deterministic", "sgd", "lightgbm"], default="sgd"); infer.add_argument("--model-path"); infer.add_argument("--threshold", type=float); infer.add_argument("--no-tfidf", action="store_true")
     write_output = add_common("write-output", command_write_output); write_output.add_argument("--split", choices=["train", "test"], default="test"); write_output.add_argument("--threshold", type=float)
