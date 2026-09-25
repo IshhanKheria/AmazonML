@@ -16,8 +16,10 @@ class SGDPairModel:
         self.estimator = SGDClassifier(**defaults)
         self.params = defaults
 
-    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None, eval_data=None) -> "SGDPairModel":
+    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None, eval_data=None, logger=None) -> "SGDPairModel":
         self.estimator.fit(X, y, sample_weight=sample_weight)
+        if logger is not None:
+            logger.metric("train_iterations", int(getattr(self.estimator, "n_iter_", 0)))
         return self
 
     def partial_fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> "SGDPairModel":

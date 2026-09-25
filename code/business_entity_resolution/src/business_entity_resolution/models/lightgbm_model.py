@@ -23,12 +23,25 @@ class LightGBMPairModel:
         self.lgb, self.params = lgb, defaults
         self.estimator = lgb.LGBMClassifier(**defaults)
 
-    def fit(self, X, y, sample_weight=None, eval_data=None) -> "LightGBMPairModel":
+    def fit(self, X, y, sample_weight=None, eval_data=None, logger=None) -> "LightGBMPairModel":
         kwargs: dict[str, object] = {"sample_weight": sample_weight}
+        callbacks: list[object] = []
         if eval_data is not None:
-            kwargs.update({"eval_set": [eval_data], "callbacks": [self.lgb.early_stopping(100, first_metric_only=True)]})
+            kwargs.update({"eval_set": [eval_data]})
+            callbacks.append(self.lgb.early_stopping(100, first_metric_only=True))
+        if logger is not None:
+            callbacks.append(self._logging_callback(logger))
+        if callbacks:
+            kwargs["callbacks"] = callbacks
         self.estimator.fit(X, y, **kwargs)
         return self
+
+    def _logging_callback(self, logger):
+        def _callback(environment) -> None:
+            results = environment.evaluation_result_list or []
+            for _dataset, metric, value, _higher in results:
+                logger.metric(f"train_{metric}", float(value), iteration=int(environment.iteration))
+        return _callback
 
     def predict_scores(self, X) -> np.ndarray:
         return self.estimator.predict_proba(X)[:, 1].astype(np.float32)

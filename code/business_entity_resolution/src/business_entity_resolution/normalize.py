@@ -6,8 +6,18 @@ import unicodedata
 from collections.abc import Iterable
 import pandas as pd
 
+# Legal designators are an open set: the challenge test set introduces France,
+# which never appears in training. Stripping these stops identical roots from
+# scoring lower purely because of a mismatched designation.
 LEGAL_SUFFIXES = frozenset(
-    {"corp", "corporation", "pvt", "private", "ltd", "limited", "inc", "company", "co"}
+    {
+        # US
+        "corp", "corporation", "inc", "incorporated", "llc", "llp", "lp", "co", "company",
+        # India / UK-style
+        "pvt", "private", "ltd", "limited", "enterprises", "enterprise", "opc",
+        # France
+        "sarl", "sas", "sasu", "sci", "eurl", "sa", "snc", "gie", "scop", "scp",
+    }
 )
 
 
