@@ -11,6 +11,7 @@ falls back to a plain in-process loop, so behaviour is identical.
 
 from __future__ import annotations
 
+import gc
 import multiprocessing as mp
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from typing import Callable, Iterable, Iterator, TypeVar
@@ -37,10 +38,17 @@ def parallel_map(func: Callable[[T], R], items: Iterable[T], workers: int) -> It
         for item in materialised:
             yield func(item)
         return
-    with ProcessPoolExecutor(max_workers=min(workers, len(materialised)), mp_context=_context()) as pool:
-        futures = [pool.submit(func, item) for item in materialised]
-        for future in _as_completed_bounded(futures):
-            yield future.result()
+    # Freeze long-lived shared objects before forking so worker refcount updates
+    # do not copy their pages (a major source of copy-on-write blowup).
+    gc.collect()
+    gc.freeze()
+    try:
+        with ProcessPoolExecutor(max_workers=min(workers, len(materialised)), mp_context=_context()) as pool:
+            futures = [pool.submit(func, item) for item in materialised]
+            for future in _as_completed_bounded(futures):
+                yield future.result()
+    finally:
+        gc.unfreeze()
 
 
 def parallel_imap(func: Callable[[T], R], items: Iterable[T], workers: int, max_inflight: int | None = None) -> Iterator[R]:
@@ -56,23 +64,28 @@ def parallel_imap(func: Callable[[T], R], items: Iterable[T], workers: int, max_
     max_inflight = max(workers, max_inflight or workers * 2)
     iterator = iter(items)
     pending: dict = {}
-    with ProcessPoolExecutor(max_workers=workers, mp_context=_context()) as pool:
+    gc.collect()
+    gc.freeze()
+    try:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=_context()) as pool:
 
-        def fill() -> None:
-            while len(pending) < max_inflight:
-                try:
-                    item = next(iterator)
-                except StopIteration:
-                    return
-                pending[pool.submit(func, item)] = True
+            def fill() -> None:
+                while len(pending) < max_inflight:
+                    try:
+                        item = next(iterator)
+                    except StopIteration:
+                        return
+                    pending[pool.submit(func, item)] = True
 
-        fill()
-        while pending:
-            done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
-            for future in done:
-                pending.pop(future, None)
-                yield future.result()
             fill()
+            while pending:
+                done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                for future in done:
+                    pending.pop(future, None)
+                    yield future.result()
+                fill()
+    finally:
+        gc.unfreeze()
 
 
 def _as_completed_bounded(futures) -> Iterator:

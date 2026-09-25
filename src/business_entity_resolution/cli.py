@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import gc
 import json
 from pathlib import Path
 import re
@@ -272,20 +273,66 @@ def command_make_splits(args: argparse.Namespace) -> int:
     return 0
 
 
+# Only the columns the blockers read; loading all prepared columns for ~10M
+# targets was the main cause of candidate-generation OOM.
+CANDIDATE_READ_COLUMNS = [
+    "entity_id", "country_norm",
+    "name_canonical", "name_compact", "name_core", "name_tokens",
+    "address_canonical", "address_tokens", "numeric_tokens",
+]
+
 _CANDIDATE_STATE: dict[str, object] = {}
 
 
-def _candidate_shard_worker(task: tuple[int, pd.DataFrame]) -> tuple[int, int]:
-    """Transform one Source 1 shard into candidates (runs in a worker process).
+def _prepared_parquet_bytes(config: ProjectConfig, split: str, source: int) -> int:
+    return sum(path.stat().st_size for path in _prepared_shard_store(config, split, source).iter_parts())
 
-    The fitted blockers and shard store are inherited from the parent via fork
-    (set in ``_CANDIDATE_STATE`` before the pool is created), so they are not
-    re-fit or pickled per task.
-    """
+
+def _read_prepared_columns(config: ProjectConfig, split: str, source: int, columns: list[str]) -> pd.DataFrame:
+    store = _prepared_shard_store(config, split, source)
+    frame = store.read_all(columns=columns)
+    if frame.empty and not store.is_complete():
+        raise FileNotFoundError(f"prepared data not found for {split} source{source}; run prepare first")
+    return frame
+
+
+def _candidate_workers(config: ProjectConfig, plan) -> int:
+    """Candidate-shard worker count, capped to the RAM budget (override-able)."""
+    workers = _workers(config)
+    override = (config.resources or {}).get("candidate_workers")
+    if override:
+        return max(1, min(int(override), workers))
+    budget = int(getattr(plan, "ram_budget_bytes", 0) or 0)
+    if budget:
+        workers = max(1, min(workers, budget // (2 * 1024**3)))
+    return workers
+
+
+def _candidate_fragment_worker(task: tuple[int, pd.DataFrame]) -> tuple[int, int]:
+    """Transform one S1 shard and write its candidate fragment (worker process)."""
     key, shard_s1 = task
     state = _CANDIDATE_STATE
     frames = [generator.transform(shard_s1) for generator in state["generators"]]
     candidates = pd.concat(frames, ignore_index=True)
+    if not candidates.empty:
+        candidates = candidates.sort_values(
+            ["source1_entity_id", "candidate_source", "retrieval_score", "candidate_entity_id"],
+            ascending=[True, True, False, True],
+            kind="mergesort",
+        ).reset_index(drop=True)
+    if not candidates.empty:
+        fragment = Path(state["fragment_root"]) / f"shard-{int(key):05d}" / f"source-{state['label']}.parquet"
+        fragment.parent.mkdir(parents=True, exist_ok=True)
+        write_frame(candidates, fragment)
+    return int(key), len(candidates)
+
+
+def _candidate_consolidate_worker(key: int) -> tuple[int, int]:
+    """Merge one shard's per-source fragments and commit it (worker process)."""
+    state = _CONSOLIDATE_STATE
+    fragment_dir = Path(state["fragment_root"]) / f"shard-{int(key):05d}"
+    paths = sorted(fragment_dir.glob("source-*.parquet"))
+    candidates = pd.concat([read_frame(path) for path in paths], ignore_index=True) if paths else pd.DataFrame()
     if not candidates.empty:
         candidates = candidates.sort_values(
             ["source1_entity_id", "candidate_source", "retrieval_score", "candidate_entity_id"],
@@ -299,41 +346,68 @@ def _candidate_shard_worker(task: tuple[int, pd.DataFrame]) -> tuple[int, int]:
 def command_generate_candidates(args: argparse.Namespace) -> int:
     """Generate the exact last-stage candidate set, sharded and resumable.
 
-    Blockers are fit once per split against all Source 2/3 targets, then Source 1
-    is transformed shard-by-shard so memory stays bounded. Each shard is
-    committed atomically, so a crash resumes without refitting prior shards.
+    Blockers are fit per target source, then Source 1 is transformed shard-by-shard.
+    When RAM is tight the two target sources are processed one at a time (halving
+    peak memory); otherwise both are kept resident for maximum throughput.
     """
     config = _load_config(args)
     plan = config.resource_plan()
     logger = stage_logger(config, f"candidates-{args.split}")
-    source1 = _read_prepared(config, args.split, 1)
-    targets = [(_read_prepared(config, args.split, source), source) for source in (2, 3)]
     fingerprint = _candidate_fingerprint(config, args.split, include_tfidf=not args.no_tfidf)
     store = ShardStore(config.artifact_dir("candidates") / args.split, fingerprint)
+    fragment_root = store.parts_dir / "fragments"
     if _force(args):
         for stale in store.parts_dir.glob("part-*"):
             stale.unlink()
+        shutil.rmtree(fragment_root, ignore_errors=True)
         store.stage_manifest_path().unlink(missing_ok=True)
     logger.stage_start("candidates", split=args.split, shards=config.n_shards)
     logger.resource_plan(plan)
 
+    target_rows = sum(_prepared_shard_store(config, args.split, source).total_rows() for source in (2, 3))
     if not store.is_complete():
+        source1 = _read_prepared_columns(config, args.split, 1, CANDIDATE_READ_COLUMNS)
         keys = source1["entity_id"].map(lambda value: shard_for_id(value, config.n_shards))
         buckets: dict[int, pd.DataFrame] = {int(key): group for key, group in source1.groupby(keys, sort=False)}
         pending = store.pending_keys(range(config.n_shards))
-        # Fit each blocker once per target source (the expensive step), then reuse
-        # across S1 shards. Refitting per shard would be prohibitive.
-        generators = [
-            CandidateGenerator(config.blocking, include_tfidf=not args.no_tfidf).fit(target)
-            for target, _source in targets
-        ]
-        _CANDIDATE_STATE["generators"] = generators
-        _CANDIDATE_STATE["store"] = store
-        workers = _workers(config)
-        logger.info("transforming shards", workers=workers)
-        tasks = [(key, buckets.get(int(key), source1.iloc[0:0])) for key in pending]
-        for index, (_key, rows) in enumerate(parallel_map(_candidate_shard_worker, tasks, workers), start=1):
-            logger.progress("candidates", index, len(tasks), extra={"rows": rows})
+        workers = _candidate_workers(config, plan)
+        fragment_root.mkdir(parents=True, exist_ok=True)
+
+        # ~6x expansion from compressed parquet to in-memory string frames.
+        targets_bytes = sum(_prepared_parquet_bytes(config, args.split, source) for source in (2, 3)) * 6
+        ram_budget = int(getattr(plan, "ram_budget_bytes", 0) or 0)
+        selected = str((config.resources or {}).get("candidate_mode", "auto")).lower()
+        if selected == "concurrent":
+            concurrent = True
+        elif selected == "sequential":
+            concurrent = False
+        else:
+            concurrent = ram_budget > 0 and targets_bytes <= ram_budget * 0.5
+        groups = [(2, 3)] if concurrent else [(2,), (3,)]
+        logger.info("candidate memory mode", mode="concurrent" if concurrent else "sequential",
+                    estimated_targets_gb=round(targets_bytes / 1e9, 2), workers=workers)
+
+        for group in groups:
+            label = "both" if len(group) == 2 else str(group[0])
+            generators = []
+            try:
+                for source in group:
+                    target = _read_prepared_columns(config, args.split, source, CANDIDATE_READ_COLUMNS)
+                    generators.append(CandidateGenerator(config.blocking, include_tfidf=not args.no_tfidf).fit(target))
+                    del target
+                _CANDIDATE_STATE.update(generators=generators, label=label, fragment_root=str(fragment_root))
+                tasks = [(key, buckets.get(int(key), source1.iloc[0:0])) for key in pending]
+                for index, (_key, rows) in enumerate(parallel_map(_candidate_fragment_worker, tasks, workers), start=1):
+                    logger.progress("transform", index, len(tasks), extra={"source": label, "rows": rows})
+            finally:
+                del generators
+                gc.collect()
+
+        _CONSOLIDATE_STATE.update(fragment_root=str(fragment_root), store=store)
+        logger.info("consolidating candidates", shards=len(pending))
+        for index, (key, rows) in enumerate(parallel_map(_candidate_consolidate_worker, pending, workers), start=1):
+            logger.progress("candidates", index, len(pending), extra={"shard": key, "rows": rows})
+        shutil.rmtree(fragment_root, ignore_errors=True)
         rows = store.total_rows()
         schema = ["source1_entity_id", "candidate_entity_id", "candidate_source", "reason_bits", "reason_mask", "retrieval_score", "retrieval_rank"]
         store.mark_complete(rows, schema, extra={"split": args.split})
@@ -343,9 +417,9 @@ def command_generate_candidates(args: argparse.Namespace) -> int:
     candidates = store.read_all()
     metrics: dict[str, object] = {}
     if args.split == "train" and not candidates.empty:
-        truth = ground_truth_sets(_training_truth(config, source1["entity_id"]))
-        universe_size = sum(len(frame) for frame, _source in targets)
-        metrics = candidate_metrics(truth, sets_from_long(candidates, "candidate_entity_id"), universe_size)
+        source1_ids = _read_prepared_columns(config, args.split, 1, ["entity_id"])["entity_id"]
+        truth = ground_truth_sets(_training_truth(config, source1_ids))
+        metrics = candidate_metrics(truth, sets_from_long(candidates, "candidate_entity_id"), target_rows)
         for name, value in metrics.items():
             logger.metric(f"candidate_{name}", value)
     write_manifest(store.stage_manifest_path(), stage=f"candidates-{args.split}", config=config.as_dict(), rows=len(candidates), schema=list(candidates.columns), metrics=metrics)

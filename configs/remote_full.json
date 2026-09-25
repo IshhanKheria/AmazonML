@@ -42,7 +42,8 @@
     "mode": "auto",
     "ram_fraction": 0.65,
     "vram_fraction": 0.75,
-    "enable_embeddings": "auto"
+    "enable_embeddings": "auto",
+    "candidate_mode": "auto"
   },
   "embeddings": {
     "model": "BAAI/bge-m3",
