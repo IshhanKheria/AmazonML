@@ -1,0 +1,4 @@
+# Experimental only. Keep disabled for competition runs unless organizers
+# explicitly approve pretrained representations under the supplied-data rule.
+transformers==4.46.3
+FlagEmbedding==1.3.3

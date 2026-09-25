@@ -1,0 +1,46 @@
+{
+  "data_root": "dataset",
+  "artifact_root": "artifacts/smoke",
+  "output_root": "output/smoke",
+  "run_id": "local-smoke",
+  "seed": 2026,
+  "batch_size": 5000,
+  "threads": 2,
+  "device": "cpu",
+  "max_rows": 10000,
+  "n_shards": 4,
+  "model": {
+    "kind": "sgd",
+    "threshold": 0.75,
+    "source_thresholds": {},
+    "params": {"alpha": 0.0001, "max_iter": 500}
+  },
+  "training": {
+    "max_negatives_per_entity": 20
+  },
+  "blocking": {
+    "country_primary": true,
+    "country_fallback": true,
+    "rare_token_max_df": 50,
+    "token_posting_cap": 50,
+    "tfidf_top_k": 5,
+    "tfidf_min_score": 0.1,
+    "tfidf_target_batch_size": 10000,
+    "per_source_cap": 20,
+    "batch_size": 250
+  },
+  "resources": {
+    "mode": "auto",
+    "ram_fraction": 0.5,
+    "vram_fraction": 0.75,
+    "enable_embeddings": "false"
+  },
+  "embeddings": {
+    "model": "BAAI/bge-m3",
+    "enable": "false",
+    "batch_size": 8
+  },
+  "logging": {
+    "echo": true
+  }
+}

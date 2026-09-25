@@ -1,0 +1,20 @@
+{
+  "algorithm": "stratified stable BLAKE2b round-robin; exact equivalent of assign_s1_folds",
+  "fold_counts": {
+    "0": 220694,
+    "1": 220690,
+    "2": 220689,
+    "3": 220684,
+    "4": 220683,
+    "5": 220680,
+    "6": 220679,
+    "7": 220676,
+    "8": 220674,
+    "9": 220672
+  },
+  "n_folds": 10,
+  "path": "comparison\\manifests\\s1_folds.parquet",
+  "rows": 2206821,
+  "seed": 2026,
+  "sha256": "380fd4386a794db452f650fca3aaa6d817f7c5142742aa53ab8ea46698733951"
+}

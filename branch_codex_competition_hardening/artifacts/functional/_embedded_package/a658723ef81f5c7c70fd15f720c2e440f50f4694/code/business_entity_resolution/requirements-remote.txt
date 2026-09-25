@@ -1,0 +1,2 @@
+# Optional full-scale training backend. The core pipeline and smoke tests do not require it.
+lightgbm==4.6.0

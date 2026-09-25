@@ -1,0 +1,48 @@
+{
+  "data_root": "dataset/mini",
+  "artifact_root": "artifacts/mini",
+  "output_root": "output/mini",
+  "run_id": "mini",
+  "seed": 2026,
+  "batch_size": 5000,
+  "threads": 2,
+  "device": "cpu",
+  "max_rows": null,
+  "n_shards": 4,
+  "model": {
+    "kind": "lightgbm",
+    "threshold": 0.8,
+    "france_margin": 0.05,
+    "source_thresholds": {},
+    "params": {
+      "learning_rate": 0.05,
+      "n_estimators": 300,
+      "num_leaves": 31,
+      "min_child_samples": 5
+    }
+  },
+  "blocking": {
+    "country_primary": true,
+    "country_fallback": true,
+    "rare_token_max_df": 50,
+    "token_posting_cap": 50,
+    "tfidf_top_k": 10,
+    "tfidf_min_score": 0.1,
+    "per_source_cap": 25,
+    "batch_size": 250
+  },
+  "resources": {
+    "mode": "auto",
+    "ram_fraction": 0.5,
+    "vram_fraction": 0.75,
+    "enable_embeddings": "auto"
+  },
+  "embeddings": {
+    "model": "BAAI/bge-m3",
+    "enable": "auto",
+    "batch_size": 8
+  },
+  "logging": {
+    "echo": true
+  }
+}

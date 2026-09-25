@@ -1,0 +1,141 @@
+{
+  "blocking_reasons": [],
+  "checks": {
+    "execution_role_policy_inventory": {
+      "reason": "Policy-name listing is not proof of effective access and is not required by this gate.",
+      "status": "SKIPPED"
+    },
+    "execution_role_s3": {
+      "simulations": [
+        {
+          "action": "s3:ListBucket",
+          "decision": "allowed",
+          "missing_context": [],
+          "organizations_decision": null,
+          "permissions_boundary_decision": null,
+          "resource": "arn:aws:s3:::amazon-sagemaker-303936065943-eu-north-1-4g5ie80zojahhv"
+        },
+        {
+          "action": "s3:GetObject",
+          "decision": "allowed",
+          "missing_context": [],
+          "organizations_decision": null,
+          "permissions_boundary_decision": null,
+          "resource": "arn:aws:s3:::amazon-sagemaker-303936065943-eu-north-1-4g5ie80zojahhv/ber-comparison/shared/data/70bc1d8a16c667e0155c2105d0ab2ebe41d7e7a85d8a529e3ca81c6c3a5af037/train/train_source1.tsv"
+        },
+        {
+          "action": "s3:PutObject",
+          "decision": "allowed",
+          "missing_context": [],
+          "organizations_decision": null,
+          "permissions_boundary_decision": null,
+          "resource": "arn:aws:s3:::amazon-sagemaker-303936065943-eu-north-1-4g5ie80zojahhv/ber-comparison/runs/preflight-output"
+        }
+      ],
+      "status": "CONFIRMED"
+    },
+    "execution_role_trust": {
+      "arn": "arn:aws:iam::303936065943:role/service-role/AmazonSageMakerAdminIAMExecutionRole",
+      "max_session_duration": 3600,
+      "path": "/service-role/",
+      "required_service_principal": "sagemaker.amazonaws.com",
+      "role_id": "AROAUNRAAKGLY3WTZCUIW",
+      "service_trust_principals": [
+        "airflow-serverless.amazonaws.com",
+        "athena.amazonaws.com",
+        "bedrock.amazonaws.com",
+        "datazone.amazonaws.com",
+        "emr-serverless.amazonaws.com",
+        "glue.amazonaws.com",
+        "lakeformation.amazonaws.com",
+        "redshift.amazonaws.com",
+        "sagemaker.amazonaws.com",
+        "scheduler.amazonaws.com"
+      ],
+      "status": "CONFIRMED"
+    },
+    "identity": {
+      "account": "303936065943",
+      "arn": "arn:aws:sts::303936065943:assumed-role/AmazonML-Codex-Role/AmazonMLCodex",
+      "user_id": "AROAUNRAAKGLQWKCTMRTP:AmazonMLCodex"
+    },
+    "pass_role": {
+      "passed_to_service": "sagemaker.amazonaws.com",
+      "principal_arn": "arn:aws:iam::303936065943:role/AmazonML-Codex-Role",
+      "simulation": {
+        "action": "iam:PassRole",
+        "decision": "allowed",
+        "missing_context": [],
+        "organizations_decision": null,
+        "permissions_boundary_decision": null,
+        "resource": "arn:aws:iam::303936065943:role/service-role/AmazonSageMakerAdminIAMExecutionRole"
+      },
+      "status": "PASSROLE_CONFIRMED",
+      "target_role_arn": "arn:aws:iam::303936065943:role/service-role/AmazonSageMakerAdminIAMExecutionRole",
+      "verification_method": "iam:SimulatePrincipalPolicy"
+    },
+    "region": {
+      "sagemaker_endpoint_region": "eu-north-1",
+      "session_region": "eu-north-1"
+    },
+    "s3_actual": {
+      "bucket": "amazon-sagemaker-303936065943-eu-north-1-4g5ie80zojahhv",
+      "bucket_region": "eu-north-1",
+      "listed_objects": 4,
+      "verified_objects": [
+        {
+          "bytes": 210069713,
+          "etag": "\"435628028fc10a98e6c558dc6e861a32-4\"",
+          "key": "ber-comparison/shared/data/70bc1d8a16c667e0155c2105d0ab2ebe41d7e7a85d8a529e3ca81c6c3a5af037/train/train_source1.tsv"
+        },
+        {
+          "bytes": 489301488,
+          "etag": "\"c10d1372b190842c1251b68794065768-8\"",
+          "key": "ber-comparison/shared/data/70bc1d8a16c667e0155c2105d0ab2ebe41d7e7a85d8a529e3ca81c6c3a5af037/train/train_source2.tsv"
+        },
+        {
+          "bytes": 503705637,
+          "etag": "\"42873082578694a5a4dbbb00628fea86-8\"",
+          "key": "ber-comparison/shared/data/70bc1d8a16c667e0155c2105d0ab2ebe41d7e7a85d8a529e3ca81c6c3a5af037/train/train_source3.tsv"
+        },
+        {
+          "bytes": 127015583,
+          "etag": "\"0c39617b0f2877a748ded50f00304573-2\"",
+          "key": "ber-comparison/shared/data/70bc1d8a16c667e0155c2105d0ab2ebe41d7e7a85d8a529e3ca81c6c3a5af037/train/train_ground_truth.tsv"
+        }
+      ],
+      "verified_total_bytes": 1330092421
+    },
+    "sagemaker_list_access": {
+      "processing_jobs_found": 0,
+      "training_jobs_found": 0
+    },
+    "sdk": {
+      "boto3": "1.43.102",
+      "botocore": "1.43.102",
+      "sagemaker": null,
+      "sagemaker_core": "2.23.0"
+    }
+  },
+  "completed_at": "2026-09-25T16:02:09.812404+00:00",
+  "execution_role_arn": "arn:aws:iam::303936065943:role/service-role/AmazonSageMakerAdminIAMExecutionRole",
+  "paid_execution_allowed": true,
+  "pass_role_states": [
+    "PASSROLE_CONFIRMED",
+    "PASSROLE_DENIED",
+    "PASSROLE_UNVERIFIABLE"
+  ],
+  "profile": "amazon-ml-codex",
+  "required_region": "eu-north-1",
+  "started_at": "2026-09-25T16:01:57.211829+00:00",
+  "status": "PASSED",
+  "verification_contract": {
+    "paid_execution_requires": [
+      "PASSROLE_CONFIRMED",
+      "EXECUTION_ROLE_TRUST_CONFIRMED",
+      "EXECUTION_ROLE_S3_CONFIRMED"
+    ],
+    "pass_role_is_runtime_permission_check": true,
+    "simulate_principal_policy_is_administrative_verification_only": true
+  }
+}

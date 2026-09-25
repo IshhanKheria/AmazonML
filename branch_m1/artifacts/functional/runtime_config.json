@@ -1,0 +1,43 @@
+{
+  "data_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\AmazonML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset",
+  "artifact_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\AmazonML-ber-comparison\\branch_m1\\artifacts\\functional\\artifacts",
+  "output_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\AmazonML-ber-comparison\\branch_m1\\outputs\\functional",
+  "run_id": "notebook",
+  "seed": 2026,
+  "batch_size": 100000,
+  "threads": 4,
+  "device": "cpu",
+  "max_rows": null,
+  "n_shards": 32,
+  "model": {
+    "kind": "sgd",
+    "threshold": 0.8,
+    "france_margin": 0.05,
+    "source_thresholds": {},
+    "params": {}
+  },
+  "blocking": {
+    "country_primary": true,
+    "country_fallback": true,
+    "rare_token_max_df": 500,
+    "token_posting_cap": 250,
+    "tfidf_top_k": 20,
+    "tfidf_min_score": 0.15,
+    "per_source_cap": 100,
+    "batch_size": 1000
+  },
+  "resources": {
+    "mode": "auto",
+    "ram_fraction": 0.65,
+    "vram_fraction": 0.75,
+    "enable_embeddings": "false"
+  },
+  "embeddings": {
+    "model": "BAAI/bge-m3",
+    "enable": "false",
+    "batch_size": 64
+  },
+  "logging": {
+    "echo": true
+  }
+}

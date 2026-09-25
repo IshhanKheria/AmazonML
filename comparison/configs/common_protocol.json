@@ -1,0 +1,16 @@
+{
+  "seed": 2026,
+  "n_folds": 10,
+  "training_folds": [3, 4, 5, 6, 7, 8, 9],
+  "calibration_fold": 0,
+  "development_fold": 1,
+  "sealed_fold": 2,
+  "production_training_folds": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "threshold_count": 101,
+  "primary_metric": "macro_f0_5",
+  "beta": 0.5,
+  "embeddings_enabled": false,
+  "test_locked": true,
+  "candidate_policy": "branch_native_exact_final_model_input",
+  "experiment_0_label": "REPRODUCTION ONLY — NOT A COMPARATIVE SCORE"
+}
