@@ -22,7 +22,7 @@ from .data import count_tsv_rows, iter_tsv, load_ground_truth, load_ground_truth
 from .decisions import apply_thresholds, apply_thresholds_with_france, score_quantile_thresholds, sweep_thresholds, tune_source_thresholds
 from .embeddings import embed_split, load_embedding_vectors
 from .error_analysis import analyze_errors
-from .features import build_pair_features, feature_matrix
+from .features import FEATURE_VERSION, build_pair_features, feature_matrix
 from .labels import ground_truth_sets, label_candidates
 from .logging import stage_logger
 from .metrics import candidate_metrics, evaluate_entity_sets, sets_from_long
@@ -30,6 +30,7 @@ from .mini import build_mini
 from .models import DeterministicScorer, SGDPairModel
 from .models.lightgbm_model import LightGBMPairModel
 from .normalize import normalize_records
+from .parallel import fork_available, parallel_imap, parallel_map
 from .pipeline import run_smoke
 from .preflight import preflight_outputs, run_official_validator
 from .resources import run_with_oom_backoff
@@ -66,7 +67,14 @@ def _candidate_fingerprint(config: ProjectConfig, split: str, include_tfidf: boo
 
 
 def _feature_fingerprint(config: ProjectConfig, split: str, embeddings_used: bool = False) -> str:
-    return _candidate_fingerprint(config, split) + f":embeddings={embeddings_used}"
+    return _candidate_fingerprint(config, split) + f":embeddings={embeddings_used}:features={FEATURE_VERSION}"
+
+
+def _workers(config: ProjectConfig) -> int:
+    """Resolved worker count for shard-parallel stages (fork only)."""
+    if not fork_available():
+        return 1
+    return max(1, int(config.resource_plan().n_workers))
 
 
 def _prepared_dir(config: ProjectConfig, split: str, source: int) -> Path:
@@ -107,6 +115,15 @@ def _expected_rows(config: ProjectConfig, path: Path) -> int:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
     return rows
+
+
+def _prepare_chunk_worker(task: tuple[int, pd.DataFrame, str]) -> tuple[int, int]:
+    """Normalize one raw chunk to its interim parquet (runs in a worker process)."""
+    sequence, chunk, chunk_path = task
+    path = Path(chunk_path)
+    if not path.is_file():
+        write_frame(normalize_records(chunk), path)
+    return sequence, len(chunk)
 
 
 def _read_prepared_part(config: ProjectConfig, split: str, source: int, key: int) -> pd.DataFrame:
@@ -168,13 +185,17 @@ def command_prepare(args: argparse.Namespace) -> int:
             expected_rows = _expected_rows(config, path)
             if config.max_rows is not None:
                 expected_rows = min(expected_rows, config.max_rows)
-            for sequence, chunk in enumerate(iter_tsv(path, SOURCE_COLUMNS, config.batch_size, config.max_rows), start=1):
-                chunk_path = chunk_dir / f"chunk-{sequence:07d}.parquet"
-                if not chunk_path.is_file():
-                    normalized = normalize_records(chunk)
-                    write_frame(normalized, chunk_path)
-                total_rows += len(chunk)
-                written_chunks = sequence
+            limit = config.max_s1_rows if source == 1 and config.max_s1_rows is not None else config.max_rows
+
+            def _chunk_tasks():
+                for sequence, chunk in enumerate(iter_tsv(path, SOURCE_COLUMNS, config.batch_size, limit), start=1):
+                    yield sequence, chunk, str(chunk_dir / f"chunk-{sequence:07d}.parquet")
+
+            workers = _workers(config)
+            logger.info("normalizing chunks", workers=workers)
+            for sequence, rows in parallel_imap(_prepare_chunk_worker, _chunk_tasks(), workers, max_inflight=workers * 2):
+                total_rows += rows
+                written_chunks = max(written_chunks, sequence)
                 logger.progress("prepare", total_rows, max(expected_rows, total_rows))
             logger.info("raw chunks written", chunks=written_chunks, rows_seen=total_rows)
 
@@ -218,6 +239,30 @@ def command_make_splits(args: argparse.Namespace) -> int:
     return 0
 
 
+_CANDIDATE_STATE: dict[str, object] = {}
+
+
+def _candidate_shard_worker(task: tuple[int, pd.DataFrame]) -> tuple[int, int]:
+    """Transform one Source 1 shard into candidates (runs in a worker process).
+
+    The fitted blockers and shard store are inherited from the parent via fork
+    (set in ``_CANDIDATE_STATE`` before the pool is created), so they are not
+    re-fit or pickled per task.
+    """
+    key, shard_s1 = task
+    state = _CANDIDATE_STATE
+    frames = [generator.transform(shard_s1) for generator in state["generators"]]
+    candidates = pd.concat(frames, ignore_index=True)
+    if not candidates.empty:
+        candidates = candidates.sort_values(
+            ["source1_entity_id", "candidate_source", "retrieval_score", "candidate_entity_id"],
+            ascending=[True, True, False, True],
+            kind="mergesort",
+        ).reset_index(drop=True)
+    state["store"].commit(int(key), candidates)
+    return int(key), len(candidates)
+
+
 def command_generate_candidates(args: argparse.Namespace) -> int:
     """Generate the exact last-stage candidate set, sharded and resumable.
 
@@ -249,18 +294,13 @@ def command_generate_candidates(args: argparse.Namespace) -> int:
             CandidateGenerator(config.blocking, include_tfidf=not args.no_tfidf).fit(target)
             for target, _source in targets
         ]
-        for index, key in enumerate(pending, start=1):
-            shard_s1 = buckets.get(int(key), source1.iloc[0:0])
-            frames = [generator.transform(shard_s1) for generator in generators]
-            candidates = pd.concat(frames, ignore_index=True)
-            if not candidates.empty:
-                candidates = candidates.sort_values(
-                    ["source1_entity_id", "candidate_source", "retrieval_score", "candidate_entity_id"],
-                    ascending=[True, True, False, True],
-                    kind="mergesort",
-                ).reset_index(drop=True)
-            store.commit(int(key), candidates)
-            logger.progress("candidates", index, len(pending), extra={"shard": int(key), "rows": len(candidates)})
+        _CANDIDATE_STATE["generators"] = generators
+        _CANDIDATE_STATE["store"] = store
+        workers = _workers(config)
+        logger.info("transforming shards", workers=workers)
+        tasks = [(key, buckets.get(int(key), source1.iloc[0:0])) for key in pending]
+        for index, (_key, rows) in enumerate(parallel_map(_candidate_shard_worker, tasks, workers), start=1):
+            logger.progress("candidates", index, len(tasks), extra={"rows": rows})
         rows = store.total_rows()
         schema = ["source1_entity_id", "candidate_entity_id", "candidate_source", "reason_bits", "reason_mask", "retrieval_score", "retrieval_rank"]
         store.mark_complete(rows, schema, extra={"split": args.split})
@@ -309,6 +349,31 @@ def command_embed(args: argparse.Namespace) -> int:
     return 0
 
 
+_FEATURE_STATE: dict[str, object] = {}
+
+
+def _feature_part_worker(task: tuple[int, str]) -> tuple[int, int]:
+    """Build and commit features for one candidate shard (runs in a worker).
+
+    Prepared S1/targets, truth, embeddings and the shard store are inherited via
+    fork, so only the (small) candidate part path crosses the process boundary.
+    """
+    key, part_path = task
+    state = _FEATURE_STATE
+    candidates = read_frame(part_path)
+    if state["split"] == "train":
+        candidates = label_candidates(candidates, state["truth"])
+    features = build_pair_features(
+        candidates,
+        state["source1"],
+        state["targets"],
+        embed_names=state["embed_names"],
+        embed_addrs=state["embed_addrs"],
+    )
+    state["store"].commit(int(key), features)
+    return int(key), len(features)
+
+
 def command_build_features(args: argparse.Namespace) -> int:
     """Build pair features shard-by-shard, resumable and OOM-adaptive.
 
@@ -340,32 +405,25 @@ def command_build_features(args: argparse.Namespace) -> int:
     logger.resource_plan(plan)
 
     if not store.is_complete():
-        part_paths = list(candidate_store.iter_parts())
-        for index, part_path in enumerate(part_paths, start=1):
+        tasks = []
+        for part_path in candidate_store.iter_parts():
             key = int(part_path.stem.split("-")[1])
-            if key in store.completed_keys():
-                continue
-
-            def _build(chunk_size: int, _path=part_path, _key=key) -> pd.DataFrame:
-                candidates = read_frame(_path)
-                if args.split == "train":
-                    candidates = label_candidates(candidates, truth)
-                features = build_pair_features(
-                    candidates,
-                    source1,
-                    targets,
-                    embed_names=embed_names,
-                    embed_addrs=embed_addrs,
-                )
-                return features
-
-            features = run_with_oom_backoff(
-                _build,
-                plan.chunk_pairs,
-                on_retry=lambda size, exc: logger.event("oom_backoff", stage="features", new_chunk=size, error=type(exc).__name__),
-            )
-            store.commit(key, features)
-            logger.progress("features", index, len(part_paths), extra={"shard": key, "rows": len(features)})
+            if key not in store.completed_keys():
+                tasks.append((key, str(part_path)))
+        # Each worker copies the shared target frame while merging; cap the pool so
+        # that workers * targets stays inside the RAM budget.
+        target_bytes = int(targets.memory_usage(deep=True).sum())
+        ram_budget = int(getattr(plan, "ram_budget_bytes", 0) or 0)
+        workers = _workers(config)
+        if target_bytes > 0 and ram_budget > 0:
+            workers = max(1, min(workers, ram_budget // max(1, target_bytes * 3)))
+        logger.info("building features", workers=workers, shards=len(tasks))
+        _FEATURE_STATE.update(
+            split=args.split, truth=truth, source1=source1, targets=targets,
+            embed_names=embed_names, embed_addrs=embed_addrs, store=store,
+        )
+        for index, (key, rows) in enumerate(parallel_map(_feature_part_worker, tasks, workers), start=1):
+            logger.progress("features", index, len(tasks), extra={"shard": key, "rows": rows})
         rows = store.total_rows()
         sample = store.read_all()
         store.mark_complete(rows, list(sample.columns) if rows else [], extra={"split": args.split})

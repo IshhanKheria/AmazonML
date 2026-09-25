@@ -157,6 +157,12 @@ so model/threshold experiments reuse them. Changing blocking invalidates candida
 features. `train`/`score` stream feature shards and sample negatives per shard, so peak
 memory stays bounded instead of loading the full feature set.
 
+For a fast iteration run, set `max_s1_rows` in the config (e.g. `200000`) to limit
+Source 1 only; targets stay full so recall stays realistic. `prepare`,
+`generate-candidates` and `build-features` process shards in parallel worker processes
+(`fork`), using the worker count from the resource plan; the feature pool is
+automatically capped so `workers × target-size` stays inside the RAM budget.
+
 ## Submission package
 
 The challenge expects a single archive named `<team_name>_submission.zip`:

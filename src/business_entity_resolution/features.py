@@ -6,6 +6,10 @@ import math
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
+from rapidfuzz.distance import JaroWinkler
+
+# Bump when feature values/definitions change so cached feature shards rebuild.
+FEATURE_VERSION = "v2"
 
 
 def _set(value: object) -> set[str]:
@@ -62,38 +66,9 @@ def _length_ratio(left: str, right: str) -> float:
 
 def _jaro_winkler(left: str, right: str) -> float:
     a, b = left or "", right or ""
-    if a == b:
-        return 1.0
     if not a or not b:
-        return 0.0
-    match_distance = max(len(a), len(b)) // 2 - 1
-    a_matches = [False] * len(a)
-    b_matches = [False] * len(b)
-    matches = 0
-    for i, char in enumerate(a):
-        start, end = max(0, i - match_distance), min(i + match_distance + 1, len(b))
-        for j in range(start, end):
-            if b_matches[j] or b[j] != char:
-                continue
-            a_matches[i] = b_matches[j] = True
-            matches += 1
-            break
-    if matches == 0:
-        return 0.0
-    transpositions = _transpositions(a, b, a_matches, b_matches)
-    jaro = (matches / len(a) + matches / len(b) + (matches - transpositions) / matches) / 3.0
-    prefix = 0
-    for x, y in zip(a, b):
-        if x != y or prefix == 4:
-            break
-        prefix += 1
-    return jaro + prefix * 0.1 * (1 - jaro)
-
-
-def _transpositions(a: str, b: str, a_matches: list[bool], b_matches: list[bool]) -> int:
-    a_chars = [a[i] for i in range(len(a)) if a_matches[i]]
-    b_chars = [b[j] for j in range(len(b)) if b_matches[j]]
-    return sum(1 for x, y in zip(a_chars, b_chars) if x != y) // 2
+        return 1.0 if a == b else 0.0
+    return float(JaroWinkler.similarity(a, b))
 
 
 def build_pair_features(

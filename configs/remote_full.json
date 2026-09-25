@@ -8,6 +8,7 @@
   "threads": 16,
   "device": "cpu",
   "max_rows": null,
+  "max_s1_rows": null,
   "n_shards": 64,
   "model": {
     "kind": "lightgbm",
