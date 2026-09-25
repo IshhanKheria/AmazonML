@@ -286,7 +286,7 @@ def command_build_features(args: argparse.Namespace) -> int:
     targets = pd.concat([_read_prepared(config, args.split, 2), _read_prepared(config, args.split, 3)], ignore_index=True)
     truth = ground_truth_sets(_training_truth(config, source1["entity_id"])) if args.split == "train" else {}
 
-    embed_names, embed_addrs = (None, None) if getattr(args, "no_embeddings", False) else _load_embedding_vectors(config, args.split)
+    embed_names, embed_addrs = (None, None) if getattr(args, "no_embeddings", False) else load_embedding_vectors(config, args.split)
     embeddings_used = embed_names is not None
 
     fingerprint = input_fingerprint(

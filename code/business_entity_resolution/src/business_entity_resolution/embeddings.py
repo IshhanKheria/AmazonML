@@ -12,14 +12,13 @@ point returns ``None`` and the pipeline continues without embedding features.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from .artifacts import read_frame, write_frame
+from .artifacts import read_frame
 from .checkpoint import ShardStore, input_fingerprint, shard_for_id
 
 DEFAULT_MODEL = "BAAI/bge-m3"
@@ -55,24 +54,25 @@ def _embed_dir(config: Any, split: str, source: int) -> Path:
     return config.artifact_dir("embeddings") / f"{split}_source{source}"
 
 
-def _text_key(text: str) -> str:
-    return text if text else _EMPTY_SENTINEL
-
-
 def load_embedding_vectors(config: Any, split: str) -> tuple[dict[str, np.ndarray] | None, dict[str, np.ndarray] | None]:
     """Return (name_vectors, address_vectors) keyed by entity_id, or (None, None).
 
-    Vectors are loaded from the cached embedding shards for this split and are
-    only returned when both Source 2 and Source 3 caches exist and load cleanly.
+    Vectors for all three sources are loaded from the cached embedding shards.
+    Source 1 vectors are required because pair cosine compares an S1 entity
+    against an S2/S3 candidate. Returns ``(None, None)`` when the Source 2/3
+    caches are not complete, so feature building proceeds without them.
     """
     names: dict[str, np.ndarray] = {}
     addrs: dict[str, np.ndarray] = {}
-    found_any = False
+    # Source 2 and 3 must be complete for the features to be meaningful.
     for source in (2, 3):
         store = ShardStore(_embed_dir(config, split, source), _embedding_fingerprint(config, split, source))
         if not store.is_complete():
+            return None, None
+    for source in (1, 2, 3):
+        store = ShardStore(_embed_dir(config, split, source), _embedding_fingerprint(config, split, source))
+        if not store.is_complete():
             continue
-        found_any = True
         for part in store.iter_parts():
             frame = read_frame(part)
             if frame.empty:
@@ -82,12 +82,11 @@ def load_embedding_vectors(config: Any, split: str) -> tuple[dict[str, np.ndarra
             for index, entity_id in enumerate(frame["entity_id"].to_numpy()):
                 names[str(entity_id)] = name_matrix[index].astype(np.float32)
                 addrs[str(entity_id)] = addr_matrix[index].astype(np.float32)
-    if not found_any:
-        return None, None
     return names, addrs
 
 
 def _embedding_fingerprint(config: Any, split: str, source: int) -> str:
+    """Fingerprint the prepared shards plus the model name for cache validity."""
     model = str((config.embeddings or {}).get("model", DEFAULT_MODEL))
     prepared = config.artifact_dir("prepared") / f"{split}_source{source}"
     return input_fingerprint([prepared]) + f":model={model}"
@@ -139,29 +138,31 @@ def embed_split(config: Any, split: str, logger: Any | None = None) -> dict[str,
     plan = config.resource_plan()
     batch_size = int((config.embeddings or {}).get("batch_size", plan.embed_batch_size))
     total_vectors = 0
-    for source in (2, 3):
+    for source in (1, 2, 3):
         store = ShardStore(_embed_dir(config, split, source), _embedding_fingerprint(config, split, source))
         if store.is_complete():
             logger.info("embeddings already complete", split=split, source=source)
             continue
+        prepared_dir = config.artifact_dir("prepared") / f"{split}_source{source}"
         frame = pd.concat(
-            [read_frame(path, columns=["entity_id", "business_name", "business_address"]) for path in sorted((config.artifact_dir("prepared") / f"{split}_source{source}").glob("part-*.parquet"))],
+            [read_frame(path, columns=["entity_id", "business_name", "business_address"]) for path in sorted(prepared_dir.glob("part-*.parquet"))],
             ignore_index=True,
         )
         n_shards = config.n_shards
         keys = frame["entity_id"].map(lambda value: shard_for_id(value, n_shards))
         buckets = {int(key): group for key, group in frame.groupby(keys, sort=False)}
         pending = store.pending_keys(range(n_shards))
+        source_vectors = 0
         for index, key in enumerate(pending, start=1):
             group = buckets.get(int(key), frame.iloc[0:0])
             name_texts = [str(value) if value else _EMPTY_SENTINEL for value in group["business_name"].tolist()]
             addr_texts = [str(value) if value else _EMPTY_SENTINEL for value in group["business_address"].tolist()]
 
-            def _run(chunk_size: int) -> pd.DataFrame:
-                name_matrix = _encode_texts(model, backend, name_texts, chunk_size)
-                addr_matrix = _encode_texts(model, backend, addr_texts, chunk_size)
+            def _run(chunk_size: int, _name=name_texts, _addr=addr_texts, _group=group) -> pd.DataFrame:
+                name_matrix = _encode_texts(model, backend, _name, chunk_size)
+                addr_matrix = _encode_texts(model, backend, _addr, chunk_size)
                 return pd.DataFrame({
-                    "entity_id": group["entity_id"].to_numpy(),
+                    "entity_id": _group["entity_id"].to_numpy(),
                     "vec_name": list(name_matrix.astype(np.float16)),
                     "vec_addr": list(addr_matrix.astype(np.float16)),
                 })
@@ -174,14 +175,8 @@ def embed_split(config: Any, split: str, logger: Any | None = None) -> dict[str,
                 on_retry=lambda size, exc: logger.event("oom_backoff", stage="embeddings", new_batch=size, error=type(exc).__name__),
             )
             store.commit(int(key), vectors)
-            total_vectors += len(vectors)
+            source_vectors += len(vectors)
             logger.progress("embeddings", index, len(pending), extra={"split": split, "source": source, "shard": int(key), "device": device})
-        store.mark_complete(total_vectors, ["entity_id", "vec_name", "vec_addr"], extra={"split": split, "source": source, "model": str((config.embeddings or {}).get("model", DEFAULT_MODEL))})
+        store.mark_complete(source_vectors, ["entity_id", "vec_name", "vec_addr"], extra={"split": split, "source": source, "model": str((config.embeddings or {}).get("model", DEFAULT_MODEL))})
+        total_vectors += source_vectors
     return {"enabled": True, "split": split, "vectors": total_vectors, "device": device}
-
-
-def _cosine(pair_matrix: np.ndarray, query_vectors: np.ndarray, index: np.ndarray) -> np.ndarray:
-    gathered = pair_matrix[index]
-    query_norm = query_vectors / (np.linalg.norm(query_vectors, axis=1, keepdims=True) + 1e-9)
-    gathered_norm = gathered / (np.linalg.norm(gathered, axis=1, keepdims=True) + 1e-9)
-    return np.einsum("ij,ij->i", query_norm, gathered_norm).astype(np.float32)
