@@ -492,6 +492,15 @@ def command_analyze_errors(args: argparse.Namespace) -> int:
     return 0
 
 
+def _test_target_ids(config: ProjectConfig, split: str) -> set[str]:
+    """All valid Source 2/3 IDs for a split, used by the pre-write format gate."""
+    ids: set[str] = set()
+    for source in (2, 3):
+        frame = _read_prepared(config, split, source)
+        ids.update(frame["entity_id"].astype(str))
+    return ids
+
+
 def command_infer(args: argparse.Namespace) -> int:
     config = _load_config(args)
     logger = stage_logger(config, "infer")
@@ -521,7 +530,8 @@ def command_infer(args: argparse.Namespace) -> int:
         source_thresholds=config.model.get("source_thresholds", {}),
     )
     candidate_sets = sets_from_long(candidates, "candidate_entity_id")
-    matching, candidate = write_submission_outputs(config.output_root, source1["entity_id"], predictions, candidate_sets)
+    valid_targets = _test_target_ids(config, "test") if args.split == "test" else None
+    matching, candidate = write_submission_outputs(config.output_root, source1["entity_id"], predictions, candidate_sets, valid_targets=valid_targets)
     logger.info("wrote outputs", matching=str(matching), candidate=str(candidate), entities=len(predictions))
     logger.stage_end("infer")
     print(matching); print(candidate)
@@ -548,7 +558,8 @@ def command_write_output(args: argparse.Namespace) -> int:
         source_thresholds=config.model.get("source_thresholds", {}),
     )
     candidate_sets = sets_from_long(candidates, "candidate_entity_id")
-    matching, candidate = write_submission_outputs(config.output_root, source1["entity_id"], predictions, candidate_sets)
+    valid_targets = _test_target_ids(config, "test") if args.split == "test" else None
+    matching, candidate = write_submission_outputs(config.output_root, source1["entity_id"], predictions, candidate_sets, valid_targets=valid_targets)
     logger.event("outputs_rewritten", matching=str(matching), candidate=str(candidate))
     print(matching); print(candidate)
     return 0
