@@ -410,13 +410,15 @@ def command_build_features(args: argparse.Namespace) -> int:
             key = int(part_path.stem.split("-")[1])
             if key not in store.completed_keys():
                 tasks.append((key, str(part_path)))
-        # Each worker copies the shared target frame while merging; cap the pool so
-        # that workers * targets stays inside the RAM budget.
-        target_bytes = int(targets.memory_usage(deep=True).sum())
+        # Prepared targets/embeddings are inherited read-only via fork (COW), so
+        # the real per-worker cost is one candidate shard expansion + its feature
+        # frame. Cap the pool from the on-disk shard size so workers fit in RAM.
+        part_sizes = [path.stat().st_size for path in candidate_store.iter_parts()]
+        worker_bytes = max(1, int(max(part_sizes, default=0) * 12))
         ram_budget = int(getattr(plan, "ram_budget_bytes", 0) or 0)
         workers = _workers(config)
-        if target_bytes > 0 and ram_budget > 0:
-            workers = max(1, min(workers, ram_budget // max(1, target_bytes * 3)))
+        if ram_budget > 0:
+            workers = max(1, min(workers, ram_budget // worker_bytes))
         logger.info("building features", workers=workers, shards=len(tasks))
         _FEATURE_STATE.update(
             split=args.split, truth=truth, source1=source1, targets=targets,
