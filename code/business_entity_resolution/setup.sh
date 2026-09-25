@@ -2,9 +2,9 @@
 # Provision the Business Entity Resolution pipeline on a fresh Linux machine.
 #
 # Usage:
-#   bash setup.sh                # CPU-only or auto-detected CUDA
-#   CUDA=cu121 bash setup.sh     # force a specific torch CUDA wheel channel
-#   NO_EMBED=1 bash setup.sh     # skip torch/BGE-M3 (text features only)
+#   bash setup.sh                   # compliant text-feature pipeline
+#   ENABLE_EMBED=1 bash setup.sh    # experimental pretrained embeddings
+#   ENABLE_EMBED=1 CUDA=cu121 bash setup.sh
 #
 # The script is idempotent: re-running it reuses the virtualenv and only
 # installs what is missing.
@@ -35,7 +35,7 @@ python -m pip install -r requirements.txt -r requirements-dev.txt
 echo "==> Installing LightGBM backend"
 python -m pip install -r requirements-remote.txt
 
-if [ "${NO_EMBED:-0}" != "1" ]; then
+if [ "${ENABLE_EMBED:-0}" = "1" ]; then
   echo "==> Installing PyTorch"
   if [ -n "${CUDA:-}" ]; then
     python -m pip install torch --index-url "https://download.pytorch.org/whl/${CUDA}"
@@ -47,9 +47,9 @@ if [ "${NO_EMBED:-0}" != "1" ]; then
     python -m pip install torch --index-url "https://download.pytorch.org/whl/cpu"
   fi
   echo "==> Installing BGE-M3 runtime (transformers / FlagEmbedding)"
-  python -m pip install "transformers==4.46.3" "FlagEmbedding==1.3.3"
+  python -m pip install -r requirements-embeddings.txt
 else
-  echo "==> Skipping torch/BGE-M3 (NO_EMBED=1)"
+  echo "==> Skipping experimental pretrained embeddings (default)"
 fi
 
 echo "==> Installing the package in editable mode"

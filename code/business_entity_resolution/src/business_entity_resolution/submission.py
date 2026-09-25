@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 from collections.abc import Iterable, Mapping
+import os
 from pathlib import Path
 import pandas as pd
 
@@ -89,5 +91,58 @@ def write_submission_outputs(
     matching_path, candidate_path = output_dir / "matching_results.tsv", output_dir / "candidate_pairs.tsv"
     matching.to_csv(matching_path, sep="\t", index=False, encoding="utf-8", lineterminator="\n")
     candidate.to_csv(candidate_path, sep="\t", index=False, encoding="utf-8", lineterminator="\n")
+    return matching_path, candidate_path
+
+
+def write_submission_outputs_sharded(
+    output_dir: str | Path,
+    shards: Iterable[
+        tuple[Iterable[str], Mapping[str, Iterable[str]], Mapping[str, Iterable[str]]]
+    ],
+) -> tuple[Path, Path]:
+    """Write exact submission TSVs one Source 1 shard at a time.
+
+    This enforces the row/list/subset contract without materializing hundreds
+    of millions of candidate IDs in a process-wide dictionary.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    matching_path = output_dir / "matching_results.tsv"
+    candidate_path = output_dir / "candidate_pairs.tsv"
+    matching_tmp = matching_path.with_suffix(".tsv.tmp")
+    candidate_tmp = candidate_path.with_suffix(".tsv.tmp")
+    seen: set[str] = set()
+    try:
+        with matching_tmp.open("w", encoding="utf-8", newline="") as matching_handle, candidate_tmp.open(
+            "w", encoding="utf-8", newline=""
+        ) as candidate_handle:
+            matching_writer = csv.writer(matching_handle, delimiter="\t", lineterminator="\n")
+            candidate_writer = csv.writer(candidate_handle, delimiter="\t", lineterminator="\n")
+            matching_writer.writerow(MATCHING_COLUMNS)
+            candidate_writer.writerow(CANDIDATE_COLUMNS)
+            for source1_ids, predictions, candidates in shards:
+                for raw_source1_id in source1_ids:
+                    source1_id = str(raw_source1_id)
+                    if source1_id in seen:
+                        raise OutputFormatError(f"duplicate Source 1 row across shards: {source1_id}")
+                    seen.add(source1_id)
+                    matched = set(str(value) for value in predictions.get(source1_id, ()))
+                    candidate_set = set(str(value) for value in candidates.get(source1_id, ()))
+                    absent = matched - candidate_set
+                    if absent:
+                        raise OutputFormatError(
+                            f"matching: {source1_id} has matches absent from candidates: {sorted(absent)[:3]}"
+                        )
+                    for value in matched | candidate_set:
+                        if value.startswith("S1-") or not value.startswith(("S2-", "S3-")):
+                            raise OutputFormatError(f"invalid target prefix {value!r}")
+                    matching_writer.writerow((source1_id, _joined(matched)))
+                    candidate_writer.writerow((source1_id, _joined(candidate_set)))
+        os.replace(matching_tmp, matching_path)
+        os.replace(candidate_tmp, candidate_path)
+    except Exception:
+        matching_tmp.unlink(missing_ok=True)
+        candidate_tmp.unlink(missing_ok=True)
+        raise
     return matching_path, candidate_path
 

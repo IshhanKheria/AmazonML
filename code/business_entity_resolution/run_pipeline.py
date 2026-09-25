@@ -26,6 +26,7 @@ Optionally validate against the official validator:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -64,7 +65,7 @@ def _sh(args: list[str]) -> int:
 
 def run_profile(profile: str, validator: str | None, skip_embeddings: bool) -> int:
     spec = PROFILES[profile]
-    config = spec["config"]
+    config = str((PACKAGE_ROOT / spec["config"]).resolve())
 
     # Resolve the data root. Mini lives in the package; full may live elsewhere
     # (student_resource, a mounted volume, etc.), so auto-detect it when the
@@ -88,6 +89,13 @@ def run_profile(profile: str, validator: str | None, skip_embeddings: bool) -> i
     print("=" * 72)
 
     started = time.time()
+    config_payload = json.loads(Path(config).read_text(encoding="utf-8"))
+    run_id = str(config_payload.get("run_id", "default"))
+    model_dir = Path(os.environ["BER_ARTIFACT_ROOT"]) / run_id / "models"
+    model_suffix = {"lightgbm": ".txt", "sgd": ".joblib", "deterministic": ".json"}[spec["model"]]
+    validation0_model = model_dir / f"{spec['model']}-validation-fold0{model_suffix}"
+    validation1_model = model_dir / f"{spec['model']}-validation-fold1{model_suffix}"
+    final_model = model_dir / f"{spec['model']}-final{model_suffix}"
     steps = [
         ["prepare", "--config", config, "--split", "both"],
         ["make-splits", "--config", config, "--folds", str(spec["folds"])],
@@ -99,11 +107,14 @@ def run_profile(profile: str, validator: str | None, skip_embeddings: bool) -> i
     steps += [
         ["build-features", "--config", config, "--split", "train"],
         ["build-features", "--config", config, "--split", "test"],
-        ["train", "--config", config, "--model", spec["model"], "--all-training-data"],
-        ["score", "--config", config, "--split", "train", "--model", spec["model"]],
-        ["tune-decision", "--config", config],
-        ["evaluate", "--config", config],
-        ["infer", "--config", config, "--model", spec["model"]],
+        ["train", "--config", config, "--model", spec["model"], "--exclude-folds", "0,1", "--output-name", f"{spec['model']}-validation-fold0"],
+        ["score", "--config", config, "--split", "train", "--model", spec["model"], "--model-path", str(validation0_model), "--validation-fold", "0", "--output-name", "validation-fold0.parquet"],
+        ["tune-decision", "--config", config, "--score-file", "validation-fold0.parquet", "--validation-fold", "0"],
+        ["train", "--config", config, "--model", spec["model"], "--validation-fold", "1", "--output-name", f"{spec['model']}-validation-fold1"],
+        ["score", "--config", config, "--split", "train", "--model", spec["model"], "--model-path", str(validation1_model), "--validation-fold", "1", "--output-name", "evaluation-fold1.parquet"],
+        ["evaluate", "--config", config, "--score-file", "evaluation-fold1.parquet", "--validation-fold", "1"],
+        ["train", "--config", config, "--model", spec["model"], "--all-training-data", "--output-name", f"{spec['model']}-final"],
+        ["infer", "--config", config, "--model", spec["model"], "--model-path", str(final_model)],
     ]
     if validator:
         steps.append(["preflight", "--config", config, "--official-validator", validator, "--check-ids"])
@@ -130,6 +141,7 @@ def _find_real_dataset() -> Path | None:
     candidates = [
         Path(os.environ["BER_SOURCE_DATA_ROOT"]) if os.environ.get("BER_SOURCE_DATA_ROOT") else None,
         PACKAGE_ROOT / "dataset",
+        PACKAGE_ROOT.parent.parent / "6ab10eb3b23ba_student_resource" / "student_resource" / "dataset",
         PACKAGE_ROOT.parent.parent / "student_resource" / "dataset",
         PACKAGE_ROOT.parent.parent.parent / "student_resource" / "dataset",
         PACKAGE_ROOT.parent.parent.parent / "dataset",
@@ -160,7 +172,8 @@ def main() -> int:
                   "folder containing train/ and test/ TSVs.", file=sys.stderr)
             return 2
         print(f"Mini dataset not found; building 15 records from {real_root} ...")
-        code = _sh(["make-mini", "--config", PROFILES["mini"]["config"],
+        mini_config = str((PACKAGE_ROOT / PROFILES["mini"]["config"]).resolve())
+        code = _sh(["make-mini", "--config", mini_config,
                     "--mini-root", str((PACKAGE_ROOT / "dataset/mini").resolve()),
                     "--source-root", str(real_root), "--count", "15"])
         if code != 0:

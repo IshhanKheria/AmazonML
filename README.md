@@ -4,7 +4,10 @@ This repository is the working area for a competition-compliant entity-resolutio
 
 ## Status
 
-Initialization and dataset forensics only. No final model has been trained and no test predictions have been produced.
+Implementation and reliability hardening. The modular pipeline, regression
+tests, sharded execution paths, validation protocol, and submission tooling are
+implemented. No final full-data model has been trained and no leaderboard-ready
+test predictions have been produced.
 
 ## Non-negotiable constraints
 
@@ -57,5 +60,7 @@ All TSVs must be read with an explicit tab delimiter and UTF-8 encoding.
 
 ## Next phase
 
-The planning phase should define an entity-level validation protocol, reconstruct pair labels, benchmark complementary high-recall blocking strategies, and specify macro-F0.5 threshold/singleton evaluation before any final model is trained.
-
+Execute the bounded real-data candidate benchmarks and fold-based model
+experiments described in [`docs/REPAIR_PLAN.md`](docs/REPAIR_PLAN.md) on remote
+compute. Freeze a final model and threshold only after those results are
+recorded.

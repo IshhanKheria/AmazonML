@@ -12,9 +12,11 @@
   "model": {
     "kind": "sgd",
     "threshold": 0.75,
-    "france_margin": 0.05,
     "source_thresholds": {},
     "params": {"alpha": 0.0001, "max_iter": 500}
+  },
+  "training": {
+    "max_negatives_per_entity": 20
   },
   "blocking": {
     "country_primary": true,
@@ -23,6 +25,7 @@
     "token_posting_cap": 50,
     "tfidf_top_k": 5,
     "tfidf_min_score": 0.1,
+    "tfidf_target_batch_size": 10000,
     "per_source_cap": 20,
     "batch_size": 250
   },

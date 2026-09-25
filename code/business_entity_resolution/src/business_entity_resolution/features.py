@@ -18,27 +18,30 @@ def _set(value: object) -> set[str]:
 
 def _jaccard(left: object, right: object) -> float:
     a, b = _set(left), _set(right)
-    return 1.0 if not a and not b else len(a & b) / len(a | b)
+    # Missing evidence is not positive evidence. Empty/empty used to score as
+    # a perfect match, which was particularly harmful for blank addresses.
+    return 0.0 if not a or not b else len(a & b) / len(a | b)
 
 
 def _containment(left: object, right: object) -> float:
     a, b = _set(left), _set(right)
     if not a or not b:
-        return float(not a and not b)
+        return 0.0
     return len(a & b) / min(len(a), len(b))
 
 
 def _ratio(left: str, right: str) -> float:
-    return fuzz.ratio(left or "", right or "") / 100.0
+    return 0.0 if not left or not right else fuzz.ratio(left, right) / 100.0
 
 
 def _partial(left: str, right: str) -> float:
-    return fuzz.partial_ratio(left or "", right or "") / 100.0
+    return 0.0 if not left or not right else fuzz.partial_ratio(left, right) / 100.0
 
 
 FEATURE_COLUMNS = [
     "name_raw_exact", "name_canonical_exact", "name_compact_exact", "name_core_exact",
-    "name_token_sorted_exact", "name_ratio", "name_partial", "name_token_sort_ratio",
+    "name_token_sorted_exact", "name_accent_folded_exact", "name_accent_folded_ratio",
+    "name_ratio", "name_partial", "name_token_sort_ratio",
     "name_token_set_ratio", "name_token_jaccard", "name_token_containment", "name_length_ratio",
     "name_jaro_winkler",
     "address_canonical_exact", "address_compact_exact", "address_ratio", "address_partial",
@@ -57,7 +60,7 @@ EMBEDDING_COLUMNS = ["bge_name_cosine", "bge_addr_cosine"]
 
 def _length_ratio(left: str, right: str) -> float:
     a, b = len(left or ""), len(right or "")
-    return 1.0 if a == b == 0 else min(a, b) / max(a, b)
+    return 0.0 if not a or not b else min(a, b) / max(a, b)
 
 
 def _jaro_winkler(left: str, right: str) -> float:
@@ -108,7 +111,11 @@ def build_pair_features(
     if not required.issubset(candidates.columns):
         raise ValueError(f"candidate table missing columns: {sorted(required - set(candidates.columns))}")
     if candidates.empty:
-        return pd.DataFrame(columns=["source1_entity_id", "candidate_entity_id", *FEATURE_COLUMNS])
+        columns = ["source1_entity_id", "candidate_entity_id", "candidate_source", *FEATURE_COLUMNS]
+        for passthrough in ("label", "sample_weight", "forced_positive"):
+            if passthrough in candidates:
+                columns.append(passthrough)
+        return pd.DataFrame(columns=columns)
     s1 = source1.add_prefix("s1_").rename(columns={"s1_entity_id": "source1_entity_id"})
     target = targets.add_prefix("c_").rename(columns={"c_entity_id": "candidate_entity_id"})
     pairs = candidates.merge(s1, on="source1_entity_id", how="left", validate="many_to_one")
@@ -140,6 +147,11 @@ def build_pair_features(
             "name_compact_exact": float(row.s1_name_compact == row.c_name_compact),
             "name_core_exact": float(row.s1_name_core == row.c_name_core),
             "name_token_sorted_exact": float(row.s1_name_token_sorted == row.c_name_token_sorted),
+            "name_accent_folded_exact": float(
+                bool(row.s1_name_accent_folded)
+                and row.s1_name_accent_folded == row.c_name_accent_folded
+            ),
+            "name_accent_folded_ratio": _ratio(row.s1_name_accent_folded, row.c_name_accent_folded),
             "name_ratio": name_ratio,
             "name_partial": _partial(s1_name, c_name),
             "name_token_sort_ratio": fuzz.token_sort_ratio(s1_name, c_name) / 100.0,

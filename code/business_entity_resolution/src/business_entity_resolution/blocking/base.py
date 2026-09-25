@@ -16,6 +16,7 @@ class CandidateReason(IntFlag):
     TFIDF_NAME = 64
     TFIDF_ADDRESS = 128
     COUNTRY_FALLBACK = 256
+    EXACT_ACCENT_FOLDED = 512
 
 
 REASON_NAMES = {reason.value: reason.name.lower() for reason in CandidateReason}
@@ -46,12 +47,19 @@ def finalize_candidates(frames: list[pd.DataFrame], per_source_cap: int | None =
         retrieval_rank=("retrieval_rank", "min"),
     )
     grouped["reason_mask"] = grouped["reason_bits"].map(reason_text)
+    exact_mask = int(
+        CandidateReason.EXACT_NAME
+        | CandidateReason.EXACT_COMPACT
+        | CandidateReason.EXACT_CORE
+        | CandidateReason.EXACT_ACCENT_FOLDED
+    )
+    grouped["_exact_priority"] = grouped["reason_bits"].map(lambda value: int(bool(int(value) & exact_mask)))
+    grouped["_reason_count"] = grouped["reason_bits"].map(lambda value: int(value).bit_count())
     grouped = grouped.sort_values(
-        ["source1_entity_id", "candidate_source", "retrieval_score", "retrieval_rank", "candidate_entity_id"],
-        ascending=[True, True, False, True, True],
+        ["source1_entity_id", "candidate_source", "_exact_priority", "_reason_count", "retrieval_rank", "retrieval_score", "candidate_entity_id"],
+        ascending=[True, True, False, False, True, False, True],
         kind="mergesort",
     )
     if per_source_cap is not None:
         grouped = grouped[grouped.groupby(["source1_entity_id", "candidate_source"]).cumcount() < per_source_cap]
-    return grouped.reset_index(drop=True)
-
+    return grouped.drop(columns=["_exact_priority", "_reason_count"]).reset_index(drop=True)

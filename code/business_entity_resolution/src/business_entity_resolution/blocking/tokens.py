@@ -53,20 +53,28 @@ class RareTokenBlocker:
         for query in queries.itertuples(index=False):
             country = str(getattr(query, "country_norm"))
             scores: dict[str, float] = defaultdict(float)
-            fallback = False
+            fallback_targets: set[str] = set()
             for token in set(_tokens(getattr(query, self.field))):
                 df = self._df.get((country, token), 0)
                 postings = self._postings.get((country, token), []) if self.country_primary else self._global.get(token, [])
+                used_fallback = False
                 if not postings and self.country_fallback:
-                    postings, df, fallback = self._global.get(token, []), self._global_df.get(token, 0), True
+                    postings, df, used_fallback = self._global.get(token, []), self._global_df.get(token, 0), True
                 if not postings or df > self.max_df:
                     continue
                 weight = 1.0 / math.log2(df + 2.0)
-                for target_id in postings[: self.posting_cap]:
+                # Score all postings that passed max_df, then cap the ranked
+                # union. Slicing before aggregation made recall depend on raw
+                # target row order whenever max_df exceeded posting_cap.
+                for target_id in postings:
                     scores[target_id] += weight
+                    if used_fallback:
+                        fallback_targets.add(target_id)
             ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[: self.posting_cap]
             for rank, (target_id, score) in enumerate(ranked, start=1):
-                bits = int(self.reason) | (int(CandidateReason.COUNTRY_FALLBACK) if fallback else 0)
+                bits = int(self.reason) | (
+                    int(CandidateReason.COUNTRY_FALLBACK) if target_id in fallback_targets else 0
+                )
                 rows.append({
                     "source1_entity_id": str(getattr(query, "entity_id")),
                     "candidate_entity_id": target_id,

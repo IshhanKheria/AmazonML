@@ -12,7 +12,6 @@
   "model": {
     "kind": "lightgbm",
     "threshold": 0.8,
-    "france_margin": 0.05,
     "source_thresholds": {},
     "params": {
       "learning_rate": 0.05,
@@ -21,6 +20,9 @@
       "min_child_samples": 5
     }
   },
+  "training": {
+    "max_negatives_per_entity": 20
+  },
   "blocking": {
     "country_primary": true,
     "country_fallback": true,
@@ -28,6 +30,7 @@
     "token_posting_cap": 50,
     "tfidf_top_k": 10,
     "tfidf_min_score": 0.1,
+    "tfidf_target_batch_size": 10000,
     "per_source_cap": 25,
     "batch_size": 250
   },
@@ -39,7 +42,7 @@
   },
   "embeddings": {
     "model": "BAAI/bge-m3",
-    "enable": "auto",
+    "enable": "false",
     "batch_size": 8
   },
   "logging": {

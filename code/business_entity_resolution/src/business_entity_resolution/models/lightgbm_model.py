@@ -22,6 +22,7 @@ class LightGBMPairModel:
         defaults.update(params)
         self.lgb, self.params = lgb, defaults
         self.estimator = lgb.LGBMClassifier(**defaults)
+        self.booster = None
 
     def fit(self, X, y, sample_weight=None, eval_data=None, logger=None) -> "LightGBMPairModel":
         kwargs: dict[str, object] = {"sample_weight": sample_weight}
@@ -44,6 +45,8 @@ class LightGBMPairModel:
         return _callback
 
     def predict_scores(self, X) -> np.ndarray:
+        if self.booster is not None:
+            return np.asarray(self.booster.predict(X), dtype=np.float32)
         return self.estimator.predict_proba(X)[:, 1].astype(np.float32)
 
     def save(self, path: str | Path) -> None:
@@ -56,20 +59,9 @@ class LightGBMPairModel:
         path = Path(path)
         metadata = json.loads(path.with_suffix(path.suffix + ".json").read_text(encoding="utf-8"))
         obj = cls(**metadata["params"])
-        booster = obj.lgb.Booster(model_file=str(path))
-        obj.estimator._Booster = booster
-        obj.estimator.fitted_ = True
-        # Restore the sklearn wrapper's feature-count state so predict_proba can
-        # validate the input matrix instead of assuming -1 features.
-        n_features = int(booster.num_feature())
-        obj.estimator._n_features = n_features
-        obj.estimator._n_features_ = n_features
-        obj.estimator.n_features_in_ = n_features
-        obj.estimator._le = None
-        try:
-            obj.estimator._classes = np.array([0, 1])
-        except Exception:  # noqa: BLE001
-            pass
+        # Use the stable native Booster API after loading instead of mutating
+        # private sklearn-wrapper attributes that vary between LightGBM releases.
+        obj.booster = obj.lgb.Booster(model_file=str(path))
         return obj
 
     def metadata(self) -> dict[str, object]:

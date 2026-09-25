@@ -6,7 +6,7 @@ This package implements a reproducible pipeline for linking every Source 1 entit
 
 - **Crash-safe resume.** Every long stage (prepare, candidates, embeddings, features) processes work in shards and commits each shard atomically (temp file + `os.replace`) with a config/input fingerprint. Re-running the same command skips completed shards and resumes from the last committed one — no full restart. Use `--force` to redo a stage.
 - **Hardware-adaptive resources.** `resources.py` detects available RAM, CPU count, and CUDA/VRAM at run time and derives chunk/batch sizes from them. Nothing is hardcoded.
-- **OOM backoff.** Every heavy loop is wrapped so that an out-of-memory condition halves the chunk size and retries, instead of crashing.
+- **Bounded pair processing.** Candidate queries, pair features, scoring, and output writing are sharded. Target blocker indexes remain source-sized and must be capacity-tested before a full run.
 - **Continuous logging.** Each stage writes to stdout and to `artifacts/<run_id>/logs/<stage>.log`, flushed per line, including per-shard progress, ETA, peak memory, and LightGBM training metrics.
 - **Format guarantee.** Before writing, outputs pass an in-process gate (one row per test S1, no dupes, no whitespace, valid prefixes, matches ⊆ candidates). `write-output` can regenerate formatting from cached scores/candidates without re-running the model.
 
@@ -18,10 +18,10 @@ Raw TSV
   → raw-preserving normalization (US / India / France legal suffixes)
   → leakage-safe S1 folds
   → complementary candidate generation (7-way union, resumable)
-  → optional BGE-M3 pair cosine features (pair-level, no ANN)
-  → candidate-only pair features (36 features)
+  → optional experimental embedding features (disabled by default)
+  → candidate-only pair features (39 features)
   → deterministic / SGD / optional LightGBM scorer
-  → macro-F0.5 threshold tuning + conservative France margin
+  → macro-F0.5 threshold tuning on complete held-out S1 folds
   → format-gated matching_results.tsv + candidate_pairs.tsv
   → internal preflight + official validator
 ```
@@ -31,7 +31,7 @@ The final candidate table is the exact table passed to feature extraction and sc
 ## Models and licenses
 
 - LightGBM (`lightgbm==4.6.0`), MIT licensed.
-- Optional `BAAI/bge-m3` embeddings: MIT licensed, ~568M parameters (within the 8B limit).
+- The optional BGE-M3 integration is experimental and disabled in every supplied profile. Do not enable it unless the organizers explicitly confirm that pretrained representations satisfy the supplied-data-only rule.
 - `country` is treated strictly as an open-set string label; it is never hardcoded.
 
 
@@ -54,9 +54,8 @@ Generated artifacts are written to configured `artifacts/` and `output/` roots.
 Provision a fresh machine with the helper script (detects GPU, picks the right torch wheel):
 
 ```bash
-bash setup.sh                 # auto-detect CPU/CUDA
-CUDA=cu121 bash setup.sh      # force a CUDA wheel channel
-NO_EMBED=1 bash setup.sh      # skip torch / BGE-M3 (text features only)
+bash setup.sh                      # compliant text-feature pipeline
+ENABLE_EMBED=1 bash setup.sh       # experimental; requires organizer approval
 ```
 
 Or install manually from `code/business_entity_resolution/`:
@@ -88,7 +87,7 @@ BER_THREADS
 
 `resources` and `embeddings` config blocks control device mode (`auto`/`cpu`/`gpu`),
 the RAM/VRAM fractional budgets, and whether BGE-M3 features are enabled
-(`auto`/`true`/`false`). `n_shards` controls checkpoint granularity.
+(`true`/`false`; supplied profiles use `false`). `n_shards` controls checkpoint granularity.
 
 ## Input contract
 
@@ -115,22 +114,12 @@ plus decoys, straight from the real files, into `dataset/mini/` with the exact
 real schema. Use it to verify the whole cycle end-to-end before the full run.
 
 ```bash
-python -m business_entity_resolution make-mini --config configs/mini.json
-
-python -m business_entity_resolution prepare             --config configs/mini.json --split both
-python -m business_entity_resolution make-splits         --config configs/mini.json --folds 5
-python -m business_entity_resolution generate-candidates --config configs/mini.json --split train
-python -m business_entity_resolution generate-candidates --config configs/mini.json --split test
-python -m business_entity_resolution embed               --config configs/mini.json --split both
-python -m business_entity_resolution build-features      --config configs/mini.json --split train
-python -m business_entity_resolution build-features      --config configs/mini.json --split test
-python -m business_entity_resolution train               --config configs/mini.json --model lightgbm --all-training-data
-python -m business_entity_resolution tune-decision       --config configs/mini.json
-python -m business_entity_resolution evaluate            --config configs/mini.json
-python -m business_entity_resolution infer               --config configs/mini.json --model lightgbm
-python -m business_entity_resolution preflight           --config configs/mini.json \
-    --official-validator /path/to/student_resource/utils/validate_submission.py --check-ids
+python run_pipeline.py --profile mini --skip-embeddings \
+  --validator /path/to/student_resource/utils/validate_submission.py
 ```
+
+The runner tunes the decision threshold on fold 0, reports an unbiased estimate
+on a separately trained fold-1 model, then trains the final model on all rows.
 
 Any of these commands can be re-run after a crash and will resume.
 
@@ -149,28 +138,32 @@ python -m business_entity_resolution prepare --config configs/remote_full.json -
 python -m business_entity_resolution make-splits --config configs/remote_full.json --folds 10
 python -m business_entity_resolution generate-candidates --config configs/remote_full.json --split train
 python -m business_entity_resolution build-features --config configs/remote_full.json --split train
-python -m business_entity_resolution train --config configs/remote_full.json --model lightgbm --validation-fold 0
-python -m business_entity_resolution score --config configs/remote_full.json --split train --model lightgbm --validation-fold 0
-python -m business_entity_resolution tune-decision --config configs/remote_full.json
-python -m business_entity_resolution evaluate --config configs/remote_full.json
+python -m business_entity_resolution train --config configs/remote_full.json --exclude-folds 0,1 --output-name lightgbm-validation-fold0
+python -m business_entity_resolution score --config configs/remote_full.json --split train --model-path /mounted/work/artifacts/remote-full/models/lightgbm-validation-fold0.txt --validation-fold 0 --output-name validation-fold0.parquet
+python -m business_entity_resolution tune-decision --config configs/remote_full.json --score-file validation-fold0.parquet --validation-fold 0
+
+# Independent evaluation: train without fold 1, then score/evaluate fold 1.
+python -m business_entity_resolution train --config configs/remote_full.json --validation-fold 1 --output-name lightgbm-validation-fold1
+python -m business_entity_resolution score --config configs/remote_full.json --split train --model-path /mounted/work/artifacts/remote-full/models/lightgbm-validation-fold1.txt --validation-fold 1 --output-name evaluation-fold1.parquet
+python -m business_entity_resolution evaluate --config configs/remote_full.json --score-file evaluation-fold1.parquet --validation-fold 1
 ```
 
 After selecting and freezing a validated model and threshold:
 
 ```bash
-python -m business_entity_resolution train --config configs/remote_full.json --model lightgbm --all-training-data
+python -m business_entity_resolution train --config configs/remote_full.json --all-training-data --output-name lightgbm-final
 python -m business_entity_resolution prepare --config configs/remote_full.json --split test
 python -m business_entity_resolution generate-candidates --config configs/remote_full.json --split test
 python -m business_entity_resolution build-features --config configs/remote_full.json --split test
-python -m business_entity_resolution infer --config configs/remote_full.json --model lightgbm \
-    --model-path /mounted/work/artifacts/full/remote-full/models/lightgbm.txt
+python -m business_entity_resolution infer --config configs/remote_full.json \
+    --model-path /mounted/work/artifacts/remote-full/models/lightgbm-final.txt
 python -m business_entity_resolution preflight --config configs/remote_full.json \
     --official-validator /mounted/challenge/utils/validate_submission.py --check-ids
 python -m business_entity_resolution package --config configs/remote_full.json --team-name YOUR_TEAM \
     --documentation /mounted/challenge/Documentation_template.md
 ```
 
-To enable BGE-M3 on the full run, set `embeddings.enable` to `true` (or `auto` with the backend installed) and run `embed --split both` between candidate generation and feature building.
+Keep embedding features disabled for competition runs unless the supplied-data-only and model-license interpretation is confirmed in writing.
 
 Complete the supplied documentation template before packaging. The package command refuses to create a submission archive without it.
 
@@ -191,6 +184,6 @@ Both files contain exactly one row per test S1, including blank rows. Internal p
 - Candidate ordering and output lists are deterministic.
 - Stage artifacts use explicit schemas and manifests.
 - Raw challenge files are never modified.
-- Supplied challenge data only; no pretrained models or external address/entity data.
+- Supplied challenge data only in the default and recommended workflows; no external address/entity lookup.
 - LightGBM is optional and MIT licensed; any use must be recorded in the run manifest.
 - A final model is not selected until held-out experiments run on remote compute.

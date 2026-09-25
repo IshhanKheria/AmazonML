@@ -12,6 +12,7 @@ marks the stage finished.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -32,7 +33,8 @@ def shard_for_id(entity_id: str, n_shards: int) -> int:
     digits = entity_id.split("-", 1)[-1]
     if digits.isdigit():
         return int(digits) % n_shards
-    return abs(hash(entity_id)) % n_shards
+    digest = hashlib.blake2b(str(entity_id).encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % n_shards
 
 
 def shard_ids(ids: Iterable[str], n_shards: int) -> dict[int, list[str]]:

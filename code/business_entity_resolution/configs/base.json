@@ -12,9 +12,11 @@
   "model": {
     "kind": "sgd",
     "threshold": 0.8,
-    "france_margin": 0.05,
     "source_thresholds": {},
     "params": {}
+  },
+  "training": {
+    "max_negatives_per_entity": 50
   },
   "blocking": {
     "country_primary": true,
@@ -23,6 +25,7 @@
     "token_posting_cap": 250,
     "tfidf_top_k": 20,
     "tfidf_min_score": 0.15,
+    "tfidf_target_batch_size": 50000,
     "per_source_cap": 100,
     "batch_size": 1000
   },
@@ -34,7 +37,7 @@
   },
   "embeddings": {
     "model": "BAAI/bge-m3",
-    "enable": "auto",
+    "enable": "false",
     "batch_size": 64
   },
   "logging": {

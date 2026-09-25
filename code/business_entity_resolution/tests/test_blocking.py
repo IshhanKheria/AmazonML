@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 
 from business_entity_resolution.blocking import CandidateGenerator
+from business_entity_resolution.blocking.base import CandidateReason
+from business_entity_resolution.blocking.tokens import RareTokenBlocker
+from business_entity_resolution.blocking.tfidf import TfidfTopKBlocker
 from business_entity_resolution.normalize import normalize_records
 
 
@@ -34,3 +37,37 @@ def test_blockers_accept_arrow_roundtrip_array_tokens(smoke_frames):
             frame[column] = frame[column].map(np.asarray)
     candidates = CandidateGenerator({"token_posting_cap": 10, "per_source_cap": 10}, include_tfidf=False).fit(n2).transform(ns1)
     assert not candidates.empty
+
+
+def test_token_posting_cap_is_independent_of_target_row_order():
+    columns = ["entity_id", "country_norm", "name_tokens"]
+    targets = pd.DataFrame([
+        (f"S2-{index}", "us", ("shared",)) for index in range(1, 301)
+    ], columns=columns)
+    query = pd.DataFrame([("S1-1", "us", ("shared",))], columns=columns)
+    first = RareTokenBlocker("name_tokens", CandidateReason.RARE_NAME_TOKEN, 500, 25).fit(targets).transform(query)
+    second = RareTokenBlocker("name_tokens", CandidateReason.RARE_NAME_TOKEN, 500, 25).fit(targets.iloc[::-1]).transform(query)
+    assert first["candidate_entity_id"].tolist() == second["candidate_entity_id"].tolist()
+
+
+def test_country_fallback_reason_is_candidate_specific():
+    columns = ["entity_id", "country_norm", "name_tokens"]
+    targets = pd.DataFrame([
+        ("S2-1", "france", ("local",)),
+        ("S2-2", "us", ("global",)),
+    ], columns=columns)
+    query = pd.DataFrame([
+        ("S1-1", "france", ("local", "global")),
+    ], columns=columns)
+    result = RareTokenBlocker("name_tokens", CandidateReason.RARE_NAME_TOKEN, 10, 10).fit(targets).transform(query)
+    bits = dict(zip(result["candidate_entity_id"], result["reason_bits"]))
+    assert not bits["S2-1"] & int(CandidateReason.COUNTRY_FALLBACK)
+    assert bits["S2-2"] & int(CandidateReason.COUNTRY_FALLBACK)
+
+
+def test_chunked_tfidf_matches_single_target_block(smoke_frames):
+    s1, s2, _, _ = smoke_frames
+    queries, targets = normalize_records(s1), normalize_records(s2)
+    chunked = TfidfTopKBlocker(top_k=3, min_score=0.0, batch_size=2, target_batch_size=2).fit(targets).transform(queries)
+    single = TfidfTopKBlocker(top_k=3, min_score=0.0, batch_size=2, target_batch_size=100).fit(targets).transform(queries)
+    pd.testing.assert_frame_equal(chunked, single)

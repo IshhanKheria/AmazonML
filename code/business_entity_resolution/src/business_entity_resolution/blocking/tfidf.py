@@ -17,11 +17,14 @@ class TfidfTopKBlocker:
         top_k: int = 20,
         min_score: float = 0.15,
         batch_size: int = 1000,
+        target_batch_size: int = 50_000,
         country_primary: bool = True,
         reason: CandidateReason = CandidateReason.TFIDF_NAME,
     ) -> None:
         self.field, self.top_k, self.min_score = field, top_k, min_score
-        self.batch_size, self.country_primary, self.reason = batch_size, country_primary, reason
+        self.batch_size = batch_size
+        self.target_batch_size = target_batch_size
+        self.country_primary, self.reason = country_primary, reason
         self.vectorizers: dict[str, TfidfVectorizer] = {}
         self.target_matrices: dict[str, object] = {}
         self.target_ids: dict[str, np.ndarray] = {}
@@ -51,15 +54,33 @@ class TfidfTopKBlocker:
             for start in range(0, len(group), self.batch_size):
                 batch = group.iloc[start : start + self.batch_size]
                 query_matrix = vectorizer.transform(batch[self.field].astype(str)).tocsr()
-                similarities = safe_sparse_dot(query_matrix, target_matrix.T, dense_output=False).tocsr()
+                best_indices = [np.empty(0, dtype=np.int64) for _ in range(len(batch))]
+                best_scores = [np.empty(0, dtype=np.float32) for _ in range(len(batch))]
+                # Multiply against bounded target blocks. Computing query x all
+                # targets before top-K could create an enormous sparse matrix
+                # for common character n-grams.
+                for target_start in range(0, target_matrix.shape[0], self.target_batch_size):
+                    target_stop = min(target_matrix.shape[0], target_start + self.target_batch_size)
+                    similarities = safe_sparse_dot(
+                        query_matrix,
+                        target_matrix[target_start:target_stop].T,
+                        dense_output=False,
+                    ).tocsr()
+                    for local_row in range(len(batch)):
+                        begin, end = similarities.indptr[local_row], similarities.indptr[local_row + 1]
+                        indices = similarities.indices[begin:end].astype(np.int64, copy=False) + target_start
+                        scores = similarities.data[begin:end].astype(np.float32, copy=False)
+                        valid = scores >= self.min_score
+                        if not np.any(valid):
+                            continue
+                        indices = np.concatenate((best_indices[local_row], indices[valid]))
+                        scores = np.concatenate((best_scores[local_row], scores[valid]))
+                        if len(scores) > self.top_k:
+                            chosen = np.argpartition(scores, -self.top_k)[-self.top_k:]
+                            indices, scores = indices[chosen], scores[chosen]
+                        best_indices[local_row], best_scores[local_row] = indices, scores
                 for local_row, query_id in enumerate(batch["entity_id"].astype(str)):
-                    begin, end = similarities.indptr[local_row], similarities.indptr[local_row + 1]
-                    indices, scores = similarities.indices[begin:end], similarities.data[begin:end]
-                    valid = scores >= self.min_score
-                    indices, scores = indices[valid], scores[valid]
-                    if len(scores) > self.top_k:
-                        chosen = np.argpartition(scores, -self.top_k)[-self.top_k:]
-                        indices, scores = indices[chosen], scores[chosen]
+                    indices, scores = best_indices[local_row], best_scores[local_row]
                     order = np.lexsort((target_ids[indices], -scores)) if len(scores) else []
                     for rank, pos in enumerate(order, start=1):
                         target_id = str(target_ids[indices[pos]])
@@ -72,4 +93,3 @@ class TfidfTopKBlocker:
                             "retrieval_rank": rank,
                         })
         return pd.DataFrame(rows) if rows else empty_candidates()
-
