@@ -1,0 +1,206 @@
+{
+  "complete": true,
+  "completed_at_epoch": 1790285473.3711016,
+  "config": {
+    "artifact_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\artifacts",
+    "batch_size": 5000,
+    "blocking": {
+      "batch_size": 250,
+      "country_fallback": true,
+      "country_primary": true,
+      "per_source_cap": 20,
+      "rare_token_max_df": 50,
+      "tfidf_min_score": 0.1,
+      "tfidf_top_k": 5,
+      "token_posting_cap": 50
+    },
+    "data_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset",
+    "device": "cpu",
+    "max_rows": 1000,
+    "model": {
+      "kind": "sgd",
+      "params": {
+        "alpha": 0.0001,
+        "max_iter": 500
+      },
+      "source_thresholds": {},
+      "threshold": 0.75
+    },
+    "output_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\code\\business_entity_resolution\\output\\smoke",
+    "run_id": "local-smoke",
+    "seed": 2026,
+    "threads": 2
+  },
+  "config_fingerprint": "df6b295174c10076ffd7337ad73bdde726f7d3d7bac89b64bdf65f8104fa6acc",
+  "inputs": [],
+  "metrics": {
+    "ground_truth": {
+      "cardinality": {
+        "0": 47,
+        "1": 55,
+        "2": 178,
+        "3": 248,
+        "4": 222,
+        "5": 143,
+        "6": 68,
+        "7": 35,
+        "8": 3,
+        "9": 1
+      },
+      "columns": [
+        "source1_entity_id",
+        "matched_entity_ids"
+      ],
+      "duplicate_source1_ids": 0,
+      "malformed_rows": 0,
+      "path": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset\\train\\train_ground_truth.tsv",
+      "positive_links": 3444,
+      "rows": 1000,
+      "singleton_rate": 0.047,
+      "singletons": 47
+    },
+    "sources": {
+      "test_source1": {
+        "bad_entity_ids": 0,
+        "blank_counts": {
+          "business_address": 0,
+          "business_name": 0,
+          "country": 0,
+          "entity_id": 0
+        },
+        "columns": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "countries": {
+          "France": 128,
+          "India": 482,
+          "US": 390
+        },
+        "duplicate_entity_ids": 0,
+        "path": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset\\test\\test_source1.tsv",
+        "rows": 1000
+      },
+      "test_source2": {
+        "bad_entity_ids": 0,
+        "blank_counts": {
+          "business_address": 24,
+          "business_name": 0,
+          "country": 0,
+          "entity_id": 0
+        },
+        "columns": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "countries": {
+          "France": 140,
+          "India": 469,
+          "US": 391
+        },
+        "duplicate_entity_ids": 0,
+        "path": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset\\test\\test_source2.tsv",
+        "rows": 1000
+      },
+      "test_source3": {
+        "bad_entity_ids": 0,
+        "blank_counts": {
+          "business_address": 26,
+          "business_name": 0,
+          "country": 0,
+          "entity_id": 0
+        },
+        "columns": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "countries": {
+          "France": 159,
+          "India": 473,
+          "US": 368
+        },
+        "duplicate_entity_ids": 0,
+        "path": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset\\test\\test_source3.tsv",
+        "rows": 1000
+      },
+      "train_source1": {
+        "bad_entity_ids": 0,
+        "blank_counts": {
+          "business_address": 0,
+          "business_name": 0,
+          "country": 0,
+          "entity_id": 0
+        },
+        "columns": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "countries": {
+          "India": 405,
+          "US": 595
+        },
+        "duplicate_entity_ids": 0,
+        "path": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset\\train\\train_source1.tsv",
+        "rows": 1000
+      },
+      "train_source2": {
+        "bad_entity_ids": 0,
+        "blank_counts": {
+          "business_address": 35,
+          "business_name": 0,
+          "country": 0,
+          "entity_id": 0
+        },
+        "columns": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "countries": {
+          "India": 396,
+          "US": 604
+        },
+        "duplicate_entity_ids": 0,
+        "path": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset\\train\\train_source2.tsv",
+        "rows": 1000
+      },
+      "train_source3": {
+        "bad_entity_ids": 0,
+        "blank_counts": {
+          "business_address": 37,
+          "business_name": 0,
+          "country": 0,
+          "entity_id": 0
+        },
+        "columns": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "countries": {
+          "India": 407,
+          "US": 593
+        },
+        "duplicate_entity_ids": 0,
+        "path": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset\\train\\train_source3.tsv",
+        "rows": 1000
+      }
+    }
+  },
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.12.3 (tags/v3.12.3:f6650f9, Apr  9 2024, 14:05:25) [MSC v.1938 64 bit (AMD64)]",
+  "rows": 6000,
+  "schema": [],
+  "stage": "audit",
+  "started_at_epoch": 1790285473.0735044
+}

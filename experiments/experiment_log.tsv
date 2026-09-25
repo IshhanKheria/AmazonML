@@ -1,1 +1,3 @@
-experiment_id	timestamp_utc	status	git_or_code_version	data_split	seed	candidate_strategy	candidate_recall	candidate_count	reduction_ratio	features	model	hyperparameters	decision_rule	macro_precision	macro_recall	macro_f0_5	singleton_accuracy	false_merges	missed_matches	runtime_seconds	memory_notes	license_notes	artifact_paths	notes
+version https://git-lfs.github.com/spec/v1
+oid sha256:2f3ed4d32874a87e5c3b2b989255212bbe0593910cc2075305655f5c01c88114
+size 335
