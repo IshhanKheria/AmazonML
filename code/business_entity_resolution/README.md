@@ -2,24 +2,38 @@
 
 This package implements a reproducible pipeline for linking every Source 1 entity to zero, one, or multiple Source 2/Source 3 records. It uses only the supplied challenge data and performs no external business lookup, geocoding, registry access, or internet augmentation.
 
-Current state: complete codebase, unit-tested and smoke-tested on synthetic data. No full-scale model has been trained and no final test inference has been run.
+## Robustness guarantees
+
+- **Crash-safe resume.** Every long stage (prepare, candidates, embeddings, features) processes work in shards and commits each shard atomically (temp file + `os.replace`) with a config/input fingerprint. Re-running the same command skips completed shards and resumes from the last committed one — no full restart. Use `--force` to redo a stage.
+- **Hardware-adaptive resources.** `resources.py` detects available RAM, CPU count, and CUDA/VRAM at run time and derives chunk/batch sizes from them. Nothing is hardcoded.
+- **OOM backoff.** Every heavy loop is wrapped so that an out-of-memory condition halves the chunk size and retries, instead of crashing.
+- **Continuous logging.** Each stage writes to stdout and to `artifacts/<run_id>/logs/<stage>.log`, flushed per line, including per-shard progress, ETA, peak memory, and LightGBM training metrics.
+- **Format guarantee.** Before writing, outputs pass an in-process gate (one row per test S1, no dupes, no whitespace, valid prefixes, matches ⊆ candidates). `write-output` can regenerate formatting from cached scores/candidates without re-running the model.
 
 ## Architecture
 
 ```text
 Raw TSV
   → strict audit and schema validation
-  → raw-preserving normalization
+  → raw-preserving normalization (US / India / France legal suffixes)
   → leakage-safe S1 folds
-  → complementary candidate generation
-  → candidate-only pair features
+  → complementary candidate generation (7-way union, resumable)
+  → optional BGE-M3 pair cosine features (pair-level, no ANN)
+  → candidate-only pair features (36 features)
   → deterministic / SGD / optional LightGBM scorer
-  → configurable decision thresholds
-  → matching_results.tsv + candidate_pairs.tsv
+  → macro-F0.5 threshold tuning + conservative France margin
+  → format-gated matching_results.tsv + candidate_pairs.tsv
   → internal preflight + official validator
 ```
 
 The final candidate table is the exact table passed to feature extraction and scoring. It is also the source for `candidate_pairs.tsv`.
+
+## Models and licenses
+
+- LightGBM (`lightgbm==4.6.0`), MIT licensed.
+- Optional `BAAI/bge-m3` embeddings: MIT licensed, ~568M parameters (within the 8B limit).
+- `country` is treated strictly as an open-set string label; it is never hardcoded.
+
 
 ## Directory layout
 
@@ -37,20 +51,21 @@ Generated artifacts are written to configured `artifacts/` and `output/` roots.
 
 ## Installation
 
-From `code/business_entity_resolution/`:
+Provision a fresh machine with the helper script (detects GPU, picks the right torch wheel):
+
+```bash
+bash setup.sh                 # auto-detect CPU/CUDA
+CUDA=cu121 bash setup.sh      # force a CUDA wheel channel
+NO_EMBED=1 bash setup.sh      # skip torch / BGE-M3 (text features only)
+```
+
+Or install manually from `code/business_entity_resolution/`:
 
 ```bash
 python -m pip install -e .
 python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-remote.txt   # LightGBM backend
 ```
-
-For the optional MIT-licensed LightGBM backend:
-
-```bash
-python -m pip install -r requirements-remote.txt
-```
-
-No GPU is required. CPU is the default and reference execution mode.
 
 ## Configuration
 
@@ -71,7 +86,9 @@ BER_DEVICE
 BER_THREADS
 ```
 
-The pipeline never contains a username, drive letter, Colab path, or AWS-specific path. Point these variables at local disk, a mounted Colab drive, EBS/EFS, or another mounted filesystem.
+`resources` and `embeddings` config blocks control device mode (`auto`/`cpu`/`gpu`),
+the RAM/VRAM fractional budgets, and whether BGE-M3 features are enabled
+(`auto`/`true`/`false`). `n_shards` controls checkpoint granularity.
 
 ## Input contract
 
@@ -90,26 +107,32 @@ dataset/
 
 All files are UTF-8 and tab-separated. Blank strings are preserved. Country is an arbitrary open-set string; no fixed `{US, India}` enumeration exists.
 
-## Local verification
+## Mini end-to-end cycle (run this first)
 
-PowerShell, from the package directory:
+`make-mini` samples 15 realistic Source 1 entities (6 US / 6 India / 3 France,
+including singletons, single matches, multi-matches, and both-source matches)
+plus decoys, straight from the real files, into `dataset/mini/` with the exact
+real schema. Use it to verify the whole cycle end-to-end before the full run.
 
-```powershell
-$env:PYTHONPATH = (Resolve-Path '.\src')
-python -m pytest -q
-python -m business_entity_resolution smoke --config '.\configs\local_smoke.json'
+```bash
+python -m business_entity_resolution make-mini --config configs/mini.json
+
+python -m business_entity_resolution prepare             --config configs/mini.json --split both
+python -m business_entity_resolution make-splits         --config configs/mini.json --folds 5
+python -m business_entity_resolution generate-candidates --config configs/mini.json --split train
+python -m business_entity_resolution generate-candidates --config configs/mini.json --split test
+python -m business_entity_resolution embed               --config configs/mini.json --split both
+python -m business_entity_resolution build-features      --config configs/mini.json --split train
+python -m business_entity_resolution build-features      --config configs/mini.json --split test
+python -m business_entity_resolution train               --config configs/mini.json --model lightgbm --all-training-data
+python -m business_entity_resolution tune-decision       --config configs/mini.json
+python -m business_entity_resolution evaluate            --config configs/mini.json
+python -m business_entity_resolution infer               --config configs/mini.json --model lightgbm
+python -m business_entity_resolution preflight           --config configs/mini.json \
+    --official-validator /path/to/student_resource/utils/validate_submission.py --check-ids
 ```
 
-Bounded audit of the actual challenge files:
-
-```powershell
-$env:BER_DATA_ROOT = '<workspace>/6ab10eb3b23ba_student_resource/student_resource/dataset'
-$env:BER_ARTIFACT_ROOT = '<workspace>/artifacts'
-$env:PYTHONPATH = (Resolve-Path '.\src')
-python -m business_entity_resolution audit --config '.\configs\local_smoke.json' --max-rows 50000
-```
-
-The smoke command creates a four-S1 synthetic dataset, performs blocking, builds features, trains a tiny SGD model, runs inference, writes both required TSVs, and runs strict internal preflight. Its metric is a software smoke result, not a competition score.
+Any of these commands can be re-run after a crash and will resume.
 
 ## Remote full-scale workflow
 
@@ -126,8 +149,8 @@ python -m business_entity_resolution prepare --config configs/remote_full.json -
 python -m business_entity_resolution make-splits --config configs/remote_full.json --folds 10
 python -m business_entity_resolution generate-candidates --config configs/remote_full.json --split train
 python -m business_entity_resolution build-features --config configs/remote_full.json --split train
-python -m business_entity_resolution train --config configs/remote_full.json --model sgd --validation-fold 0
-python -m business_entity_resolution score --config configs/remote_full.json --split train --model sgd --validation-fold 0
+python -m business_entity_resolution train --config configs/remote_full.json --model lightgbm --validation-fold 0
+python -m business_entity_resolution score --config configs/remote_full.json --split train --model lightgbm --validation-fold 0
 python -m business_entity_resolution tune-decision --config configs/remote_full.json
 python -m business_entity_resolution evaluate --config configs/remote_full.json
 ```
@@ -135,18 +158,21 @@ python -m business_entity_resolution evaluate --config configs/remote_full.json
 After selecting and freezing a validated model and threshold:
 
 ```bash
-python -m business_entity_resolution train --config configs/remote_full.json --model sgd --all-training-data
+python -m business_entity_resolution train --config configs/remote_full.json --model lightgbm --all-training-data
 python -m business_entity_resolution prepare --config configs/remote_full.json --split test
 python -m business_entity_resolution generate-candidates --config configs/remote_full.json --split test
 python -m business_entity_resolution build-features --config configs/remote_full.json --split test
-python -m business_entity_resolution infer --config configs/remote_full.json --model sgd --model-path /mounted/work/artifacts/remote-full/models/sgd.joblib
-python -m business_entity_resolution preflight --config configs/remote_full.json --official-validator /mounted/challenge/utils/validate_submission.py --check-ids
-python -m business_entity_resolution package --config configs/remote_full.json --team-name YOUR_TEAM --documentation /mounted/challenge/Documentation_template.md
+python -m business_entity_resolution infer --config configs/remote_full.json --model lightgbm \
+    --model-path /mounted/work/artifacts/full/remote-full/models/lightgbm.txt
+python -m business_entity_resolution preflight --config configs/remote_full.json \
+    --official-validator /mounted/challenge/utils/validate_submission.py --check-ids
+python -m business_entity_resolution package --config configs/remote_full.json --team-name YOUR_TEAM \
+    --documentation /mounted/challenge/Documentation_template.md
 ```
 
-Complete the supplied documentation template before packaging. The package command refuses to create a submission archive without it.
+To enable BGE-M3 on the full run, set `embeddings.enable` to `true` (or `auto` with the backend installed) and run `embed --split both` between candidate generation and feature building.
 
-Use `--model lightgbm` only after installing `requirements-remote.txt` and validating it on held-out data.
+Complete the supplied documentation template before packaging. The package command refuses to create a submission archive without it.
 
 ## Outputs
 

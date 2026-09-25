@@ -5,4 +5,11 @@ scikit-learn==1.6.1
 joblib==1.4.2
 rapidfuzz==3.12.2
 pyarrow==18.0.0
+psutil==6.1.0
 
+# Optional BGE-M3 embedding features. Installed by setup.sh; the pipeline runs
+# without them (features degrade gracefully when these imports are missing).
+# torch is installed separately by setup.sh so the correct CPU/CUDA wheel is
+# selected for the target machine.
+transformers==4.46.3
+FlagEmbedding==1.3.3
