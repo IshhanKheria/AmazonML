@@ -66,12 +66,13 @@ def _prepared_dir(config: ProjectConfig, split: str, source: int) -> Path:
 
 
 def _read_prepared(config: ProjectConfig, split: str, source: int) -> pd.DataFrame:
-    """Read all prepared shards for a split/source, supporting legacy part naming."""
+    """Read all prepared shards for a split/source (stored under parts/)."""
     directory = _prepared_dir(config, split, source)
-    paths = sorted(directory.glob("part-*.parquet"))
-    if not paths:
+    store = _prepared_shard_store(config, split, source)
+    frame = store.read_all()
+    if frame.empty and not store.is_complete():
         raise FileNotFoundError(f"prepared data not found: {directory}; run prepare first")
-    return pd.concat([read_frame(path) for path in paths], ignore_index=True)
+    return frame
 
 
 def _prepared_shard_store(config: ProjectConfig, split: str, source: int) -> ShardStore:
@@ -84,7 +85,6 @@ def _read_prepared_part(config: ProjectConfig, split: str, source: int, key: int
     directory = _prepared_dir(config, split, source)
     path = directory / "parts" / f"part-{int(key):05d}.parquet"
     return read_frame(path)
-
 
 def _training_truth(config: ProjectConfig, source1_ids=None) -> pd.DataFrame:
     if source1_ids is not None:
@@ -531,7 +531,7 @@ def command_infer(args: argparse.Namespace) -> int:
         source_thresholds=config.model.get("source_thresholds", {}),
     )
     candidate_sets = sets_from_long(candidates, "candidate_entity_id")
-    valid_targets = _test_target_ids(config, "test") if args.split == "test" else None
+    valid_targets = _test_target_ids(config, "test")
     matching, candidate = write_submission_outputs(config.output_root, source1["entity_id"], predictions, candidate_sets, valid_targets=valid_targets)
     logger.info("wrote outputs", matching=str(matching), candidate=str(candidate), entities=len(predictions))
     logger.stage_end("infer")

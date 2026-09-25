@@ -1,0 +1,2 @@
+[console_scripts]
+ber = business_entity_resolution.cli:main

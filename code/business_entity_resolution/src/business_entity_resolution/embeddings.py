@@ -144,10 +144,8 @@ def embed_split(config: Any, split: str, logger: Any | None = None) -> dict[str,
             logger.info("embeddings already complete", split=split, source=source)
             continue
         prepared_dir = config.artifact_dir("prepared") / f"{split}_source{source}"
-        frame = pd.concat(
-            [read_frame(path, columns=["entity_id", "business_name", "business_address"]) for path in sorted(prepared_dir.glob("part-*.parquet"))],
-            ignore_index=True,
-        )
+        prepared_store = ShardStore(prepared_dir, input_fingerprint([prepared_dir]))
+        frame = prepared_store.read_all(columns=["entity_id", "business_name", "business_address"])
         n_shards = config.n_shards
         keys = frame["entity_id"].map(lambda value: shard_for_id(value, n_shards))
         buckets = {int(key): group for key, group in frame.groupby(keys, sort=False)}

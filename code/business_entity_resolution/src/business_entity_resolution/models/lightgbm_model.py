@@ -56,8 +56,20 @@ class LightGBMPairModel:
         path = Path(path)
         metadata = json.loads(path.with_suffix(path.suffix + ".json").read_text(encoding="utf-8"))
         obj = cls(**metadata["params"])
-        obj.estimator._Booster = obj.lgb.Booster(model_file=str(path))
+        booster = obj.lgb.Booster(model_file=str(path))
+        obj.estimator._Booster = booster
         obj.estimator.fitted_ = True
+        # Restore the sklearn wrapper's feature-count state so predict_proba can
+        # validate the input matrix instead of assuming -1 features.
+        n_features = int(booster.num_feature())
+        obj.estimator._n_features = n_features
+        obj.estimator._n_features_ = n_features
+        obj.estimator.n_features_in_ = n_features
+        obj.estimator._le = None
+        try:
+            obj.estimator._classes = np.array([0, 1])
+        except Exception:  # noqa: BLE001
+            pass
         return obj
 
     def metadata(self) -> dict[str, object]:
