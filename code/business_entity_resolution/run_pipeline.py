@@ -66,7 +66,14 @@ def run_profile(profile: str, validator: str | None, skip_embeddings: bool) -> i
     spec = PROFILES[profile]
     config = spec["config"]
 
-    os.environ.setdefault("BER_DATA_ROOT", str((PACKAGE_ROOT / spec["data_root"]).resolve()))
+    # Resolve the data root. Mini lives in the package; full may live elsewhere
+    # (student_resource, a mounted volume, etc.), so auto-detect it when the
+    # expected local folder is absent.
+    if profile == "full" and "BER_DATA_ROOT" not in os.environ:
+        local = (PACKAGE_ROOT / spec["data_root"]).resolve()
+        os.environ["BER_DATA_ROOT"] = str(_find_real_dataset() or local)
+    else:
+        os.environ.setdefault("BER_DATA_ROOT", str((PACKAGE_ROOT / spec["data_root"]).resolve()))
     os.environ.setdefault("BER_ARTIFACT_ROOT", str((PACKAGE_ROOT / spec["artifact_root"]).resolve()))
     os.environ.setdefault("BER_OUTPUT_ROOT", str((PACKAGE_ROOT / spec["output_root"]).resolve()))
     if "BER_THREADS" not in os.environ:
