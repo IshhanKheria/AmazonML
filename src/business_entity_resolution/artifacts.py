@@ -42,7 +42,16 @@ def read_frame(path: str | Path, columns: list[str] | None = None) -> pd.DataFra
 def write_manifest(path: str | Path, *, stage: str, config: dict[str, Any], rows: int, schema: list[str], inputs: list[str] | None = None, metrics: dict[str, Any] | None = None, started_at: float | None = None) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Merge with any manifest a ShardStore already wrote (which carries the
+    # input `fingerprint`, `parts`, etc.), so stage completion stays detectable.
+    existing: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
     manifest = {
+        **existing,
         "stage": stage,
         "config_fingerprint": config_fingerprint(config),
         "config": config,
