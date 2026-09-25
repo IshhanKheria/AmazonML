@@ -6,6 +6,7 @@ import argparse
 import datetime
 import gc
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -72,9 +73,17 @@ def _feature_fingerprint(config: ProjectConfig, split: str, embeddings_used: boo
 
 
 def _workers(config: ProjectConfig) -> int:
-    """Resolved worker count for shard-parallel stages (fork only)."""
+    """Resolved worker count for shard-parallel stages (fork only).
+
+    ``BER_WORKERS`` (env) or ``resources.workers`` (config) override the derived
+    count — useful to force serial execution where forking is unsafe (e.g. some
+    hosted notebook kernels).
+    """
     if not fork_available():
         return 1
+    override = os.environ.get("BER_WORKERS") or (config.resources or {}).get("workers")
+    if override:
+        return max(1, int(override))
     return max(1, int(config.resource_plan().n_workers))
 
 

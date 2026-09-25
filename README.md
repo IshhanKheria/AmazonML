@@ -209,6 +209,20 @@ make package
 team metadata — only `source1_entity_id` and the ID list. `make validate` runs just
 the preflight step on its own.
 
+## Run on Kaggle
+
+`notebooks/kaggle_run.ipynb` is a self-contained runner (regenerate with
+`python scripts/make_kaggle_notebook.py`). On Kaggle: Accelerator = **None**,
+**Internet ON**, then run the cells. It installs `lightgbm`/`rapidfuzz`, clones the
+public repo, obtains the TSVs (attached Kaggle Dataset if present, else Git LFS),
+runs the pipeline into `/kaggle/working/output`, and prints the result files.
+
+Notes:
+- Set `BRANCH` in the clone cell to the branch with the latest code.
+- `BER_WORKERS=1` forces serial execution if the parallel stages hang a notebook kernel.
+- CPU sessions cap at ~12 h and the pipeline is checkpointed; re-run to resume or set
+  `"max_s1_rows"` in the config to subsample.
+
 ## Development
 
 ```bash
