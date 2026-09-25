@@ -1,0 +1,35 @@
+{
+  "data_root": "dataset",
+  "artifact_root": "artifacts/full",
+  "output_root": "output",
+  "run_id": "remote-full",
+  "seed": 2026,
+  "batch_size": 100000,
+  "threads": 16,
+  "device": "cpu",
+  "max_rows": null,
+  "model": {
+    "kind": "lightgbm",
+    "threshold": 0.8,
+    "source_thresholds": {},
+    "params": {
+      "learning_rate": 0.05,
+      "n_estimators": 2000,
+      "num_leaves": 63,
+      "min_child_samples": 100,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8
+    }
+  },
+  "blocking": {
+    "country_primary": true,
+    "country_fallback": true,
+    "rare_token_max_df": 500,
+    "token_posting_cap": 250,
+    "tfidf_top_k": 20,
+    "tfidf_min_score": 0.15,
+    "per_source_cap": 100,
+    "batch_size": 1000
+  }
+}
+

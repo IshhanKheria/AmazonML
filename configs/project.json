@@ -1,0 +1,10 @@
+{
+  "dataset_root": "6ab10eb3b23ba_student_resource/student_resource/dataset",
+  "train_dir": "6ab10eb3b23ba_student_resource/student_resource/dataset/train",
+  "test_dir": "6ab10eb3b23ba_student_resource/student_resource/dataset/test",
+  "validator": "6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py",
+  "random_seed": 2026,
+  "country_handling": "open_set_string",
+  "metric": "entity_macro_f0.5",
+  "beta": 0.5
+}

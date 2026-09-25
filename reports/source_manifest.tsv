@@ -1,0 +1,14 @@
+path	bytes	role	policy
+Problem Statement.txt	13539	problem statement	read-only
+AGENT.md	8416	project mission and rules	read-only
+SKILLS.md	7954	project technical playbook	read-only
+6ab10eb3b23ba_student_resource/student_resource/README.md	14130	official challenge README	read-only
+6ab10eb3b23ba_student_resource/student_resource/Documentation_template.md	2175	methodology template	read-only
+6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py	13687	official submission validator	read-only
+6ab10eb3b23ba_student_resource/student_resource/dataset/train/train_source1.tsv	210069713	train Source 1	read-only
+6ab10eb3b23ba_student_resource/student_resource/dataset/train/train_source2.tsv	489301488	train Source 2	read-only
+6ab10eb3b23ba_student_resource/student_resource/dataset/train/train_source3.tsv	503705637	train Source 3	read-only
+6ab10eb3b23ba_student_resource/student_resource/dataset/train/train_ground_truth.tsv	127015583	train labels	read-only
+6ab10eb3b23ba_student_resource/student_resource/dataset/test/test_source1.tsv	175022086	test Source 1	read-only
+6ab10eb3b23ba_student_resource/student_resource/dataset/test/test_source2.tsv	509456422	test Source 2	read-only
+6ab10eb3b23ba_student_resource/student_resource/dataset/test/test_source3.tsv	506002772	test Source 3	read-only
