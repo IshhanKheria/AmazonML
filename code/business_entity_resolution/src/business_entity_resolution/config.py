@@ -20,8 +20,12 @@ class ProjectConfig:
     threads: int = 1
     device: str = "cpu"
     max_rows: int | None = None
+    n_shards: int = 32
     model: dict[str, Any] = field(default_factory=dict)
     blocking: dict[str, Any] = field(default_factory=dict)
+    resources: dict[str, Any] = field(default_factory=dict)
+    embeddings: dict[str, Any] = field(default_factory=dict)
+    logging: dict[str, Any] = field(default_factory=dict)
     config_path: Path | None = None
 
     @classmethod
@@ -55,10 +59,54 @@ class ProjectConfig:
             threads=int(raw.get("threads", 1)),
             device=str(raw.get("device", "cpu")),
             max_rows=None if raw.get("max_rows") is None else int(raw["max_rows"]),
+            n_shards=int(raw.get("n_shards", 32)),
             model=dict(raw.get("model", {})),
             blocking=dict(raw.get("blocking", {})),
+            resources=dict(raw.get("resources", {})),
+            embeddings=dict(raw.get("embeddings", {})),
+            logging=dict(raw.get("logging", {})),
             config_path=config_path,
         )
+
+    def resource_plan(self):
+        """Derive a :class:`~business_entity_resolution.resources.ResourcePlan`.
+
+        Imported lazily so the config module stays dependency-light and the
+        pipeline still imports without psutil/torch present.
+        """
+        from .resources import plan_resources
+
+        resources = self.resources or {}
+        return plan_resources(
+            mode=str(resources.get("mode", "auto")),
+            ram_fraction=float(resources.get("ram_fraction", 0.65)),
+            vram_fraction=float(resources.get("vram_fraction", 0.75)),
+            threads=self.threads or None,
+            chunk_pairs=resources.get("chunk_pairs"),
+            embed_batch_size=resources.get("embed_batch_size"),
+        )
+
+    def embeddings_enabled(self) -> bool:
+        setting = str((self.embeddings or {}).get("enable", "auto")).lower()
+        if setting in {"false", "0", "no", "off"}:
+            return False
+        if setting in {"true", "1", "yes", "on"}:
+            return True
+        # auto: enable only when the embedding dependencies import.
+        try:
+            import torch  # noqa: F401
+            import transformers  # noqa: F401
+
+            return True
+        except Exception:
+            return False
+
+    def shares_artifacts_root(self) -> bool:
+        try:
+            self.artifact_root.relative_to(self.data_root)
+            return True
+        except ValueError:
+            return False
 
     def artifact_dir(self, stage: str) -> Path:
         return self.artifact_root / self.run_id / stage
@@ -74,7 +122,11 @@ class ProjectConfig:
             "threads": self.threads,
             "device": self.device,
             "max_rows": self.max_rows,
+            "n_shards": self.n_shards,
             "model": self.model,
             "blocking": self.blocking,
+            "resources": self.resources,
+            "embeddings": self.embeddings,
+            "logging": self.logging,
         }
 

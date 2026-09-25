@@ -12,6 +12,22 @@ artifacts/*
 output/*
 !output/.gitkeep
 
+# Large generated/intermediate files
+*.parquet
+*.joblib
+*.zip
+*.log
+*.tmp
+data/mini/
+dataset/mini/
+code/business_entity_resolution/artifacts/
+code/business_entity_resolution/output/
+
+# Model binaries
+models/
+*.model
+*.txt.bin
+
 # Supplied challenge data (large, immutable, and not redistributable here)
 6ab10eb3b23ba_student_resource/student_resource/dataset/
 6ab10eb3b23ba_student_resource/__MACOSX/
