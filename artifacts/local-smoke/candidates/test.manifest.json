@@ -1,0 +1,51 @@
+{
+  "complete": true,
+  "completed_at_epoch": 1790285591.8020525,
+  "config": {
+    "artifact_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\artifacts",
+    "batch_size": 5000,
+    "blocking": {
+      "batch_size": 250,
+      "country_fallback": true,
+      "country_primary": true,
+      "per_source_cap": 20,
+      "rare_token_max_df": 50,
+      "tfidf_min_score": 0.1,
+      "tfidf_top_k": 5,
+      "token_posting_cap": 50
+    },
+    "data_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset",
+    "device": "cpu",
+    "max_rows": 1000,
+    "model": {
+      "kind": "sgd",
+      "params": {
+        "alpha": 0.0001,
+        "max_iter": 500
+      },
+      "source_thresholds": {},
+      "threshold": 0.75
+    },
+    "output_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\output\\actual-smoke",
+    "run_id": "local-smoke",
+    "seed": 2026,
+    "threads": 2
+  },
+  "config_fingerprint": "0b719b87dfd9812be9cb1dc8ae6d3d75b9d8a6de7d8087afaa82f67312b2426d",
+  "inputs": [],
+  "metrics": {},
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.12.3 (tags/v3.12.3:f6650f9, Apr  9 2024, 14:05:25) [MSC v.1938 64 bit (AMD64)]",
+  "rows": 39460,
+  "schema": [
+    "source1_entity_id",
+    "candidate_entity_id",
+    "candidate_source",
+    "reason_bits",
+    "retrieval_score",
+    "retrieval_rank",
+    "reason_mask"
+  ],
+  "stage": "candidates-test",
+  "started_at_epoch": null
+}

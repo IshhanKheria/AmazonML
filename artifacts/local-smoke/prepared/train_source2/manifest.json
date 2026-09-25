@@ -1,0 +1,65 @@
+{
+  "complete": true,
+  "completed_at_epoch": 1790286326.1377382,
+  "config": {
+    "artifact_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\artifacts",
+    "batch_size": 5000,
+    "blocking": {
+      "batch_size": 250,
+      "country_fallback": true,
+      "country_primary": true,
+      "per_source_cap": 20,
+      "rare_token_max_df": 50,
+      "tfidf_min_score": 0.1,
+      "tfidf_top_k": 5,
+      "token_posting_cap": 50
+    },
+    "data_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\6ab10eb3b23ba_student_resource\\student_resource\\dataset",
+    "device": "cpu",
+    "max_rows": 1000,
+    "model": {
+      "kind": "sgd",
+      "params": {
+        "alpha": 0.0001,
+        "max_iter": 500
+      },
+      "source_thresholds": {},
+      "threshold": 0.75
+    },
+    "output_root": "C:\\Users\\ishha\\OneDrive\\Desktop\\Amazon ML\\output\\smoke",
+    "run_id": "local-smoke",
+    "seed": 2026,
+    "threads": 2
+  },
+  "config_fingerprint": "e8e739dd03aa63423214c7caec51627a7a8136f06087a714630f0a1b5a337576",
+  "inputs": [],
+  "metrics": {},
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.12.3 (tags/v3.12.3:f6650f9, Apr  9 2024, 14:05:25) [MSC v.1938 64 bit (AMD64)]",
+  "rows": 1000,
+  "schema": [
+    "entity_id",
+    "business_name",
+    "business_address",
+    "country",
+    "business_name_raw",
+    "business_address_raw",
+    "country_raw",
+    "country_norm",
+    "name_canonical",
+    "name_compact",
+    "name_core",
+    "name_token_sorted",
+    "name_accent_folded",
+    "address_canonical",
+    "address_compact",
+    "address_token_sorted",
+    "name_tokens",
+    "address_tokens",
+    "numeric_tokens",
+    "postal_like_tokens",
+    "missing_address"
+  ],
+  "stage": "prepare-train-source2",
+  "started_at_epoch": null
+}
