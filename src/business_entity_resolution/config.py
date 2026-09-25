@@ -23,6 +23,7 @@ class ProjectConfig:
     n_shards: int = 32
     model: dict[str, Any] = field(default_factory=dict)
     blocking: dict[str, Any] = field(default_factory=dict)
+    sampling: dict[str, Any] = field(default_factory=dict)
     resources: dict[str, Any] = field(default_factory=dict)
     embeddings: dict[str, Any] = field(default_factory=dict)
     logging: dict[str, Any] = field(default_factory=dict)
@@ -62,6 +63,7 @@ class ProjectConfig:
             n_shards=int(raw.get("n_shards", 32)),
             model=dict(raw.get("model", {})),
             blocking=dict(raw.get("blocking", {})),
+            sampling=dict(raw.get("sampling", {})),
             resources=dict(raw.get("resources", {})),
             embeddings=dict(raw.get("embeddings", {})),
             logging=dict(raw.get("logging", {})),
@@ -125,6 +127,7 @@ class ProjectConfig:
             "n_shards": self.n_shards,
             "model": self.model,
             "blocking": self.blocking,
+            "sampling": self.sampling,
             "resources": self.resources,
             "embeddings": self.embeddings,
             "logging": self.logging,

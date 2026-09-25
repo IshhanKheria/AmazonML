@@ -26,6 +26,10 @@
     "per_source_cap": 20,
     "batch_size": 250
   },
+  "sampling": {
+    "enabled": true,
+    "max_negatives_per_entity": 50
+  },
   "resources": {
     "mode": "auto",
     "ram_fraction": 0.5,

@@ -47,7 +47,7 @@ if [ "${NO_EMBED:-0}" != "1" ]; then
     python -m pip install torch --index-url "https://download.pytorch.org/whl/cpu"
   fi
   echo "==> Installing BGE-M3 runtime (transformers / FlagEmbedding)"
-  python -m pip install "transformers==4.46.3" "FlagEmbedding==1.3.3"
+  python -m pip install "transformers==4.46.3" "FlagEmbedding==1.3.4"
 else
   echo "==> Skipping torch/BGE-M3 (NO_EMBED=1)"
 fi

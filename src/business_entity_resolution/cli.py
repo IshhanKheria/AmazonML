@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 import time
@@ -13,11 +15,11 @@ import pandas as pd
 
 from .artifacts import read_frame, write_frame, write_manifest
 from .audit import audit_dataset
-from .blocking import CandidateGenerator
+from .blocking import BLOCKING_VERSION, CandidateGenerator
 from .checkpoint import ShardStore, input_fingerprint, shard_for_id, stage_fingerprint
 from .config import ProjectConfig
 from .data import iter_tsv, load_ground_truth, load_ground_truth_for_ids, source_path
-from .decisions import apply_thresholds, apply_thresholds_with_france, score_quantile_thresholds, sweep_thresholds
+from .decisions import apply_thresholds, apply_thresholds_with_france, score_quantile_thresholds, sweep_thresholds, tune_source_thresholds
 from .embeddings import embed_split, load_embedding_vectors
 from .error_analysis import analyze_errors
 from .features import build_pair_features, feature_matrix
@@ -31,6 +33,7 @@ from .normalize import normalize_records
 from .pipeline import run_smoke
 from .preflight import preflight_outputs, run_official_validator
 from .resources import run_with_oom_backoff
+from .sampling import sample_candidate_negatives
 from .schemas import SOURCE_COLUMNS
 from .splits import assign_s1_folds, select_pair_fold
 from .submission import write_submission_outputs
@@ -54,11 +57,16 @@ def _split_input_fingerprint(config: ProjectConfig, split: str) -> str:
 
 
 def _candidate_fingerprint(config: ProjectConfig, split: str, include_tfidf: bool = True) -> str:
-    return _split_input_fingerprint(config, split) + ":" + json.dumps(config.blocking, sort_keys=True) + f":tfidf={include_tfidf}"
+    return (
+        _split_input_fingerprint(config, split)
+        + ":"
+        + json.dumps(config.blocking, sort_keys=True)
+        + f":tfidf={include_tfidf}:blockers={BLOCKING_VERSION}"
+    )
 
 
 def _feature_fingerprint(config: ProjectConfig, split: str, embeddings_used: bool = False) -> str:
-    return _split_input_fingerprint(config, split) + f":embeddings={embeddings_used}"
+    return _candidate_fingerprint(config, split) + f":embeddings={embeddings_used}"
 
 
 def _prepared_dir(config: ProjectConfig, split: str, source: int) -> Path:
@@ -390,6 +398,13 @@ def command_train(args: argparse.Namespace) -> int:
     if not args.all_training_data:
         folds = read_frame(config.artifact_dir("splits") / "s1_folds.parquet")
         features = select_pair_fold(features, folds, args.validation_fold, validation=False)
+    sampling = config.sampling or {}
+    if bool(sampling.get("enabled", True)) and args.model != "deterministic":
+        features = sample_candidate_negatives(
+            features,
+            max_negatives_per_entity=int(sampling.get("max_negatives_per_entity", 50)),
+            seed=config.seed,
+        )
     logger.info("training data ready", rows=len(features), positives=int(features["label"].sum()))
     model = _new_model(config, args.model)
     X, y = feature_matrix(features), features["label"].to_numpy(dtype=np.int8)
@@ -433,11 +448,33 @@ def command_score(args: argparse.Namespace) -> int:
     model = _load_model(args.model, model_path)
     scored = features[["source1_entity_id", "candidate_entity_id", "candidate_source"]].copy()
     scored["score"] = model.predict_scores(feature_matrix(features))
+    # Persist the signals the France override needs so evaluate/tune/infer agree.
+    for signal in ("name_core_exact", "numeric_overlap"):
+        if signal in features:
+            scored[signal] = features[signal].to_numpy()
     if "label" in features:
         scored["label"] = features["label"]
     out = write_frame(scored, config.artifact_dir("scores") / f"{args.split}.parquet")
     print(out)
     return 0
+
+
+def _decision_thresholds_path(config: ProjectConfig):
+    return config.artifact_dir("decisions") / "best_thresholds.json"
+
+
+def _resolve_thresholds(config: ProjectConfig, args: argparse.Namespace) -> tuple[float, dict[str, float]]:
+    """Threshold precedence: CLI > tuned artifact > config defaults."""
+    explicit = getattr(args, "threshold", None)
+    if explicit is not None:
+        return float(explicit), dict(config.model.get("source_thresholds", {}))
+    path = _decision_thresholds_path(config)
+    if path.is_file():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        threshold = float(payload.get("threshold", config.model.get("threshold", 0.8)))
+        source_thresholds = dict(payload.get("source_thresholds", {}))
+        return threshold, source_thresholds
+    return float(config.model.get("threshold", 0.8)), dict(config.model.get("source_thresholds", {}))
 
 
 def command_tune_decision(args: argparse.Namespace) -> int:
@@ -446,12 +483,36 @@ def command_tune_decision(args: argparse.Namespace) -> int:
     scored = read_frame(config.artifact_dir("scores") / "train.parquet")
     scored_ids = set(scored["source1_entity_id"].astype(str))
     truth = ground_truth_sets(_training_truth(config, scored_ids))
+    source1 = _read_prepared(config, "train", 1)
     thresholds = score_quantile_thresholds(scored, args.threshold_count)
     report = sweep_thresholds(scored, truth, thresholds)
     out = write_frame(report, config.artifact_dir("decisions") / "threshold_sweep.parquet")
+    tuned = tune_source_thresholds(
+        scored,
+        truth,
+        thresholds,
+        source1=source1,
+        france_margin=float((config.model or {}).get("france_margin", 0.05)),
+        max_passes=int(args.tune_passes),
+    )
+    best_path = _decision_thresholds_path(config)
+    best_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "threshold": tuned["threshold"],
+        "source_thresholds": tuned["source_thresholds"],
+        "macro_f0_5": tuned["macro_f0_5"],
+        "global_macro_f0_5": float(report.iloc[0]["macro_f0_5"]) if not report.empty else 0.0,
+        "validation_fold": int(args.validation_fold),
+        "all_training_data": bool(args.all_training_data),
+    }
+    best_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    logger.metric("tuned_threshold", float(tuned["threshold"]), macro_f0_5=float(tuned["macro_f0_5"]), source_thresholds=tuned["source_thresholds"])
     for rank, row in report.head(10).iterrows():
         logger.metric("threshold_sweep", float(row["macro_f0_5"]), rank=int(rank), threshold=float(row["threshold"]), precision=float(row["macro_precision"]), recall=float(row["macro_recall"]))
-    print(report.head(10).to_string(index=False)); print(out)
+    print(report.head(10).to_string(index=False))
+    print(f"\ntuned threshold={tuned['threshold']:.6f} source_thresholds={tuned['source_thresholds']} macro_f0_5={tuned['macro_f0_5']:.6f}")
+    print(best_path)
+    print(out)
     return 0
 
 
@@ -461,7 +522,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
     scored = read_frame(config.artifact_dir("scores") / args.score_file)
     scored_ids = set(scored["source1_entity_id"].astype(str))
     truth = ground_truth_sets(_training_truth(config, scored_ids))
-    threshold = float(args.threshold if args.threshold is not None else config.model.get("threshold", 0.8))
+    threshold, source_thresholds = _resolve_thresholds(config, args)
     source1 = _read_prepared(config, "train", 1)
     predictions = apply_thresholds_with_france(
         scored,
@@ -469,7 +530,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
         threshold,
         source1=source1,
         france_margin=float((config.model or {}).get("france_margin", 0.05)),
-        source_thresholds=config.model.get("source_thresholds", {}),
+        source_thresholds=source_thresholds,
     )
     metrics = evaluate_entity_sets(truth, predictions)
     for name, value in metrics.items():
@@ -521,14 +582,14 @@ def command_infer(args: argparse.Namespace) -> int:
     for signal in ("name_core_exact", "numeric_overlap"):
         if signal in features:
             scored[signal] = features[signal].to_numpy()
-    threshold = float(args.threshold if args.threshold is not None else config.model.get("threshold", 0.8))
+    threshold, source_thresholds = _resolve_thresholds(config, args)
     predictions = apply_thresholds_with_france(
         scored,
         source1["entity_id"],
         threshold,
         source1=source1,
         france_margin=float((config.model or {}).get("france_margin", 0.05)),
-        source_thresholds=config.model.get("source_thresholds", {}),
+        source_thresholds=source_thresholds,
     )
     candidate_sets = sets_from_long(candidates, "candidate_entity_id")
     valid_targets = _test_target_ids(config, "test")
@@ -549,14 +610,14 @@ def command_write_output(args: argparse.Namespace) -> int:
     if not scored_path.is_file():
         raise FileNotFoundError(f"cached scores not found: {scored_path}; run score/infer first")
     scored = read_frame(scored_path)
-    threshold = float(args.threshold if args.threshold is not None else config.model.get("threshold", 0.8))
+    threshold, source_thresholds = _resolve_thresholds(config, args)
     predictions = apply_thresholds_with_france(
         scored,
         source1["entity_id"],
         threshold,
         source1=source1,
         france_margin=float((config.model or {}).get("france_margin", 0.05)),
-        source_thresholds=config.model.get("source_thresholds", {}),
+        source_thresholds=source_thresholds,
     )
     candidate_sets = sets_from_long(candidates, "candidate_entity_id")
     valid_targets = _test_target_ids(config, "test") if args.split == "test" else None
@@ -575,25 +636,112 @@ def command_preflight(args: argparse.Namespace) -> int:
         for error in errors: print(f"ERROR: {error}")
         return 1
     print("Internal preflight: PASS")
-    if args.official_validator:
-        result = run_official_validator(args.official_validator, matching, candidate, test_dir, check_ids=args.check_ids)
-        print(result.stdout); print(result.stderr, file=sys.stderr)
+    validator = args.official_validator or _load_submission_config(getattr(args, "submission_config", None)).get("validator")
+    if validator:
+        result = run_official_validator(validator, matching, candidate, test_dir, check_ids=args.check_ids)
+        print(result.stdout)
+        print(result.stderr, file=sys.stderr)
         return result.returncode
+    print("No official validator configured; set 'validator' in configs/submission.json.")
     return 0
+
+
+def _load_submission_config(path: str | None) -> dict:
+    if not path:
+        return {}
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (Path.cwd() / candidate).resolve()
+    if not candidate.is_file():
+        return {}
+    return json.loads(candidate.read_text(encoding="utf-8"))
+
+
+def _render_documentation(source: Path, team_name: str, members: list[str], submission_date: str) -> str:
+    """Inject the team header from the submission config into the methodology doc."""
+    text = source.read_text(encoding="utf-8")
+    header = (
+        f"**Team Name:** {team_name}  \n"
+        f"**Team Members:** {', '.join(members) if members else '[add members]'}  \n"
+        f"**Submission Date:** {submission_date}  "
+    )
+    if "**Team Name:**" in text:
+        text = re.sub(
+            r"\*\*Team Name:\*\*.*?\*\*Submission Date:\*\*[^\n]*",
+            header,
+            text,
+            count=1,
+            flags=re.DOTALL,
+        )
+    else:
+        text = f"{header}\n\n{text}"
+    return text
 
 
 def command_package(args: argparse.Namespace) -> int:
     config = _load_config(args)
-    documentation = Path(args.documentation).resolve()
+    submission = _load_submission_config(getattr(args, "submission_config", None))
+    # Team identity is configured once in configs/submission.json.
+    team_name = args.team_name or submission.get("team_name") or "team"
+    members = submission.get("team_members") or []
+    if isinstance(members, str):
+        members = [members]
+    submission_date = submission.get("submission_date") or datetime.date.today().isoformat()
+
+    doc_value = args.documentation or submission.get("documentation") or "docs/methodology.md"
+    documentation = Path(doc_value).expanduser()
+    if not documentation.is_absolute():
+        documentation = (Path.cwd() / documentation).resolve()
     if not documentation.is_file():
-        raise FileNotFoundError(f"completed competition documentation not found: {documentation}")
-    package_root = config.artifact_dir("package") / args.team_name
+        template_value = submission.get("template") or "6ab10eb3b23ba_student_resource/student_resource/Documentation_template.md"
+        template = Path(template_value).expanduser()
+        if not template.is_absolute():
+            template = (Path.cwd() / template).resolve()
+        if not template.is_file():
+            raise FileNotFoundError(f"documentation not found: {documentation} (and no template at {template})")
+        documentation.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(template, documentation)
+        print(f"Seeded {documentation} from the challenge template; edit the methodology, then re-run.")
+
+    if not getattr(args, "skip_validate", False):
+        matching = config.output_root / "matching_results.tsv"
+        candidate = config.output_root / "candidate_pairs.tsv"
+        test_dir = config.data_root / "test"
+        errors = preflight_outputs(matching, candidate, test_dir)
+        if errors:
+            for error in errors:
+                print(f"ERROR: {error}")
+            return 1
+        print("Internal preflight: PASS")
+        validator = args.validator or submission.get("validator")
+        if validator:
+            result = run_official_validator(validator, matching, candidate, test_dir, check_ids=True)
+            print(result.stdout)
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+            if result.returncode != 0:
+                return result.returncode
+        else:
+            print("No official validator configured; set 'validator' in configs/submission.json.")
+
+    package_root = config.artifact_dir("package") / team_name
     package_root.mkdir(parents=True, exist_ok=True)
     shutil.copytree(config.output_root, package_root / "output", dirs_exist_ok=True)
+    # Rebuild the challenge-required nested layout from the repo-root package.
     project_root = Path(__file__).resolve().parents[2]
-    shutil.copytree(project_root, package_root / "code" / "business_entity_resolution", dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
-    shutil.copy2(documentation, package_root / "Documentation_template.md")
-    archive = shutil.make_archive(str(package_root), "zip", package_root)
+    code_dir = package_root / "code" / "business_entity_resolution"
+    code_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(project_root / "src", code_dir / "src", dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    for name in ("README.md", "pyproject.toml", "requirements.txt", "requirements-remote.txt", "setup.sh", "run.sh", "run_pipeline.py"):
+        source = project_root / name
+        if source.is_file():
+            shutil.copy2(source, code_dir / name)
+    shutil.copytree(project_root / "configs", code_dir / "configs", dirs_exist_ok=True)
+    (package_root / "Documentation_template.md").write_text(
+        _render_documentation(documentation, team_name, list(members), submission_date), encoding="utf-8"
+    )
+    # The challenge requires the archive to be named <team_name>_submission.zip.
+    archive = shutil.make_archive(str(package_root.with_name(f"{team_name}_submission")), "zip", package_root)
     print(archive)
     return 0
 
@@ -625,13 +773,13 @@ def build_parser() -> argparse.ArgumentParser:
     features = add_common("build-features", command_build_features); features.add_argument("--split", choices=["train", "test"], required=True); features.add_argument("--no-embeddings", action="store_true")
     train = add_common("train", command_train); train.add_argument("--model", choices=["deterministic", "sgd", "lightgbm"], default="sgd"); train.add_argument("--validation-fold", type=int, default=0); train.add_argument("--all-training-data", action="store_true")
     score = add_common("score", command_score); score.add_argument("--split", choices=["train", "test"], required=True); score.add_argument("--model", choices=["deterministic", "sgd", "lightgbm"], default="sgd"); score.add_argument("--model-path"); score.add_argument("--validation-fold", type=int, default=0); score.add_argument("--all-training-data", action="store_true")
-    tune = add_common("tune-decision", command_tune_decision); tune.add_argument("--threshold-count", type=int, default=101)
+    tune = add_common("tune-decision", command_tune_decision); tune.add_argument("--threshold-count", type=int, default=101); tune.add_argument("--tune-passes", type=int, default=1); tune.add_argument("--validation-fold", type=int, default=0); tune.add_argument("--all-training-data", action="store_true")
     evaluate = add_common("evaluate", command_evaluate); evaluate.add_argument("--score-file", default="train.parquet"); evaluate.add_argument("--threshold", type=float)
     errors = add_common("analyze-errors", command_analyze_errors); errors.add_argument("--score-file", default="train.parquet"); errors.add_argument("--threshold", type=float)
     infer = add_common("infer", command_infer); infer.add_argument("--model", choices=["deterministic", "sgd", "lightgbm"], default="sgd"); infer.add_argument("--model-path"); infer.add_argument("--threshold", type=float); infer.add_argument("--no-tfidf", action="store_true")
     write_output = add_common("write-output", command_write_output); write_output.add_argument("--split", choices=["train", "test"], default="test"); write_output.add_argument("--threshold", type=float)
-    preflight = add_common("preflight", command_preflight); preflight.add_argument("--official-validator"); preflight.add_argument("--check-ids", action="store_true")
-    package = add_common("package", command_package); package.add_argument("--team-name", required=True); package.add_argument("--documentation", required=True)
+    preflight = add_common("preflight", command_preflight); preflight.add_argument("--official-validator"); preflight.add_argument("--check-ids", action="store_true"); preflight.add_argument("--submission-config", default="configs/submission.json")
+    package = add_common("package", command_package); package.add_argument("--submission-config", default="configs/submission.json"); package.add_argument("--team-name"); package.add_argument("--documentation"); package.add_argument("--validator"); package.add_argument("--skip-validate", action="store_true")
     mini = add_common("make-mini", command_make_mini); mini.add_argument("--mini-root", default="dataset/mini"); mini.add_argument("--count", type=int, default=15); mini.add_argument("--source-root", default=None)
     add_common("smoke", command_smoke)
     return parser

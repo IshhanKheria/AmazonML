@@ -9,6 +9,10 @@ from .exact import ExactBlocker
 from .tokens import RareTokenBlocker
 from .tfidf import TfidfTopKBlocker
 
+# Bump whenever the blocker set or its semantics change so cached candidate /
+# feature shards keyed on this version are invalidated instead of reused.
+BLOCKING_VERSION = "v2"
+
 
 class CandidateGenerator:
     def __init__(self, config: dict[str, object] | None = None, include_tfidf: bool = True) -> None:
@@ -33,6 +37,14 @@ class CandidateGenerator:
             self.blockers.append(TfidfTopKBlocker(
                 top_k=int(self.config.get("tfidf_top_k", 20)),
                 min_score=float(self.config.get("tfidf_min_score", 0.15)),
+                batch_size=int(self.config.get("batch_size", 1000)),
+                country_primary=country_primary,
+            ))
+            self.blockers.append(TfidfTopKBlocker(
+                field="address_canonical",
+                reason=CandidateReason.TFIDF_ADDRESS,
+                top_k=int(self.config.get("tfidf_address_top_k", self.config.get("tfidf_top_k", 20))),
+                min_score=float(self.config.get("tfidf_address_min_score", self.config.get("tfidf_min_score", 0.15))),
                 batch_size=int(self.config.get("batch_size", 1000)),
                 country_primary=country_primary,
             ))

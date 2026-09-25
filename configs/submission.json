@@ -1,0 +1,8 @@
+{
+  "team_name": "Blackhats",
+  "team_members": ["Aayush Kumar", "Samarth Manoj Naik", "Ishhan Khera"],
+  "submission_date": "",
+  "documentation": "docs/methodology.md",
+  "template": "6ab10eb3b23ba_student_resource/student_resource/Documentation_template.md",
+  "validator": "6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py"
+}

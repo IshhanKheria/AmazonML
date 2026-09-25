@@ -28,7 +28,6 @@ import random
 
 import pandas as pd
 
-from .artifacts import write_frame
 from .data import ground_truth_path, iter_tsv, source_path
 from .schemas import GROUND_TRUTH_COLUMNS, SOURCE_COLUMNS
 

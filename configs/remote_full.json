@@ -1,20 +1,27 @@
 {
   "data_root": "dataset",
-  "artifact_root": "artifacts",
+  "artifact_root": "artifacts/full",
   "output_root": "output",
-  "run_id": "default",
+  "run_id": "remote-full",
   "seed": 2026,
   "batch_size": 100000,
-  "threads": 4,
+  "threads": 16,
   "device": "cpu",
   "max_rows": null,
-  "n_shards": 32,
+  "n_shards": 64,
   "model": {
-    "kind": "sgd",
+    "kind": "lightgbm",
     "threshold": 0.8,
     "france_margin": 0.05,
     "source_thresholds": {},
-    "params": {}
+    "params": {
+      "learning_rate": 0.05,
+      "n_estimators": 2000,
+      "num_leaves": 63,
+      "min_child_samples": 100,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8
+    }
   },
   "blocking": {
     "country_primary": true,
@@ -26,6 +33,10 @@
     "per_source_cap": 100,
     "batch_size": 1000
   },
+  "sampling": {
+    "enabled": true,
+    "max_negatives_per_entity": 50
+  },
   "resources": {
     "mode": "auto",
     "ram_fraction": 0.65,
@@ -34,7 +45,7 @@
   },
   "embeddings": {
     "model": "BAAI/bge-m3",
-    "enable": "auto",
+    "enable": "true",
     "batch_size": 64
   },
   "logging": {

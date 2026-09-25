@@ -49,6 +49,61 @@ def score_quantile_thresholds(scored_pairs: pd.DataFrame, count: int = 101) -> l
     return sorted(set(float(value) for value in scored_pairs["score"].quantile(quantiles)))
 
 
+def tune_source_thresholds(
+    scored_pairs: pd.DataFrame,
+    truth: Mapping[str, set[str] | frozenset[str]],
+    thresholds: Iterable[float],
+    *,
+    source1: pd.DataFrame | None = None,
+    france_margin: float = 0.05,
+    max_passes: int = 1,
+) -> dict[str, object]:
+    """Pick the global threshold, then coordinate-ascent per candidate source.
+
+    The competition metric is macro over Source 1 entities, so thresholds are
+    selected by macro F0.5 (never pair accuracy). Returns
+    ``{"threshold", "source_thresholds", "macro_f0_5"}``.
+    """
+    candidates = sorted(set(float(value) for value in thresholds))
+    if not candidates:
+        return {"threshold": 0.8, "source_thresholds": {}, "macro_f0_5": 0.0}
+
+    def macro(threshold: float, source_thresholds: Mapping[str, float]) -> float:
+        if source1 is not None:
+            predictions = apply_thresholds_with_france(
+                scored_pairs, truth.keys(), threshold,
+                source1=source1, france_margin=france_margin, source_thresholds=source_thresholds,
+            )
+        else:
+            predictions = apply_thresholds(scored_pairs, truth.keys(), threshold, source_thresholds)
+        return float(evaluate_entity_sets(truth, predictions)["macro_f0_5"])
+
+    best_threshold = max(candidates, key=lambda value: (macro(value, {}), -value))
+    source_thresholds: dict[str, float] = {}
+    sources = sorted(set(scored_pairs["candidate_source"].astype(str))) if "candidate_source" in scored_pairs.columns else []
+    for _ in range(max(1, max_passes)):
+        improved = False
+        for source in sources:
+            current = source_thresholds.get(source)
+            best_local, best_local_score = current, macro(best_threshold, source_thresholds)
+            for value in candidates:
+                trial = {**source_thresholds, source: value}
+                candidate_score = macro(best_threshold, trial)
+                if candidate_score > best_local_score + 1e-12:
+                    best_local, best_local_score = value, candidate_score
+            if best_local != current:
+                source_thresholds[source] = best_local
+                improved = True
+        if not improved:
+            break
+    source_thresholds = {source: value for source, value in source_thresholds.items() if abs(value - best_threshold) > 1e-12}
+    return {
+        "threshold": float(best_threshold),
+        "source_thresholds": source_thresholds,
+        "macro_f0_5": macro(best_threshold, source_thresholds),
+    }
+
+
 def apply_thresholds_with_france(
     scored_pairs: pd.DataFrame,
     all_source1_ids: Iterable[str],

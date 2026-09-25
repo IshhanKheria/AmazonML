@@ -50,7 +50,7 @@ PROFILES = {
         "config": "configs/remote_full.json",
         "data_root": "dataset",
         "artifact_root": "artifacts/full",
-        "output_root": "output/full",
+        "output_root": "output",
         "folds": 10,
         "model": "lightgbm",
     },
@@ -66,12 +66,16 @@ def run_profile(profile: str, validator: str | None, skip_embeddings: bool) -> i
     spec = PROFILES[profile]
     config = spec["config"]
 
-    # Resolve the data root. Mini lives in the package; full may live elsewhere
-    # (student_resource, a mounted volume, etc.), so auto-detect it when the
-    # expected local folder is absent.
+    # Resolve the data root. Mini lives in the package; full may live in the
+    # repo-root dataset/ or the original student_resource bundle, so auto-detect.
     if profile == "full" and "BER_DATA_ROOT" not in os.environ:
-        local = (PACKAGE_ROOT / spec["data_root"]).resolve()
-        os.environ["BER_DATA_ROOT"] = str(_find_real_dataset() or local)
+        real = _find_real_dataset()
+        if real is None:
+            print("Could not find the real dataset. Set BER_DATA_ROOT (or "
+                  "BER_SOURCE_DATA_ROOT) to the folder containing train/ and test/ "
+                  "TSVs, or run 'make data'.", file=sys.stderr)
+            return 2
+        os.environ["BER_DATA_ROOT"] = str(real)
     else:
         os.environ.setdefault("BER_DATA_ROOT", str((PACKAGE_ROOT / spec["data_root"]).resolve()))
     os.environ.setdefault("BER_ARTIFACT_ROOT", str((PACKAGE_ROOT / spec["artifact_root"]).resolve()))
@@ -99,10 +103,15 @@ def run_profile(profile: str, validator: str | None, skip_embeddings: bool) -> i
     steps += [
         ["build-features", "--config", config, "--split", "train"],
         ["build-features", "--config", config, "--split", "test"],
-        ["train", "--config", config, "--model", spec["model"], "--all-training-data"],
-        ["score", "--config", config, "--split", "train", "--model", spec["model"]],
-        ["tune-decision", "--config", config],
+        # Honest tuning: train without fold 0, score/evaluate only fold 0, so the
+        # threshold is chosen on data the model never saw.
+        ["train", "--config", config, "--model", spec["model"], "--validation-fold", "0"],
+        ["score", "--config", config, "--split", "train", "--model", spec["model"], "--validation-fold", "0"],
+        ["tune-decision", "--config", config, "--validation-fold", "0"],
         ["evaluate", "--config", config],
+        # Final model on all training data, then inference. infer reuses the
+        # tuned threshold persisted by tune-decision.
+        ["train", "--config", config, "--model", spec["model"], "--all-training-data"],
         ["infer", "--config", config, "--model", spec["model"]],
     ]
     if validator:
@@ -125,18 +134,31 @@ def run_profile(profile: str, validator: str | None, skip_embeddings: bool) -> i
     return 0
 
 
+def _looks_like_lfs_pointer(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            return handle.readline().startswith("version https://git-lfs")
+    except OSError:
+        return False
+
+
 def _find_real_dataset() -> Path | None:
-    """Locate the real challenge dataset (train/ and test/ TSVs)."""
+    """Locate the real challenge dataset (train/ and test/ TSVs).
+
+    Candidate folders holding only Git-LFS pointer stubs are skipped so the
+    pipeline fails with an actionable message instead of a schema error.
+    """
     candidates = [
         Path(os.environ["BER_SOURCE_DATA_ROOT"]) if os.environ.get("BER_SOURCE_DATA_ROOT") else None,
         PACKAGE_ROOT / "dataset",
-        PACKAGE_ROOT.parent.parent / "student_resource" / "dataset",
-        PACKAGE_ROOT.parent.parent.parent / "student_resource" / "dataset",
-        PACKAGE_ROOT.parent.parent.parent / "dataset",
+        PACKAGE_ROOT / "6ab10eb3b23ba_student_resource" / "student_resource" / "dataset",
         Path.cwd() / "dataset",
     ]
     for candidate in candidates:
-        if candidate and (candidate / "train" / "train_source1.tsv").is_file():
+        if not candidate:
+            continue
+        train = candidate / "train" / "train_source1.tsv"
+        if train.is_file() and not _looks_like_lfs_pointer(train):
             return candidate.resolve()
     return None
 
@@ -156,8 +178,9 @@ def main() -> int:
         # REAL dataset (not dataset/mini, which does not exist yet).
         real_root = _find_real_dataset()
         if real_root is None:
-            print("Could not find the real dataset. Set BER_SOURCE_DATA_ROOT to the "
-                  "folder containing train/ and test/ TSVs.", file=sys.stderr)
+            print("Could not find the real dataset. Run 'make data', or set "
+                  "BER_DATA_ROOT/BER_SOURCE_DATA_ROOT to the folder containing "
+                  "train/ and test/ TSVs.", file=sys.stderr)
             return 2
         print(f"Mini dataset not found; building 15 records from {real_root} ...")
         code = _sh(["make-mini", "--config", PROFILES["mini"]["config"],
